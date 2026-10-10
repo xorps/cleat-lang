@@ -16,6 +16,27 @@ cargo build
 cargo test
 ```
 
+## Kubernetes and CRD types
+
+Import the Kubernetes OpenAPI spec and your CRDs; `apiVersion` and `kind`
+fill themselves in, and descriptions show on hover:
+
+```ts
+import k8s from "../schemas/kubernetes-1.31.json"
+import cm from "./crds/cert-manager.crds.yaml"
+
+export k8s.Deployment { metadata.name: "web", spec: { replicas: 2, ... } }
+export cm.Certificate { metadata.name: "web-tls", spec: { secretName: "web-tls", ... } }
+```
+
+Download the schema the example uses (or another version) with:
+
+```sh
+schemas/fetch.sh 1.31
+```
+
+`cleat gen <schema>` prints the generated Cleat types.
+
 ## Editor support
 
 `cleat lsp` is a Language Server (stdio) with diagnostics as you type and
@@ -56,6 +77,7 @@ Inputs come from `<file>.inputs.json` next to the file and the
 | `src/vc.rs` | Refinement obligations: proved, refuted, or left to runtime |
 | `src/eval.rs` | Evaluator, input decoding, runtime type checks with defaults |
 | `src/emit.rs`, `src/json.rs` | YAML/JSON output with safe quoting; JSON input parsing |
+| `src/openapi.rs`, `src/modules.rs` | Schema-to-type generation; import loading and caching |
 | `src/targets.rs` | `plain`, `argocd` (sync waves), `flux` (`dependsOn`) |
 | `src/lsp.rs` | Language server: diagnostics and hover |
 | `editors/vscode/` | VS Code extension: highlighting, LSP client, output preview |

@@ -1,6 +1,7 @@
 use cleat::targets::{self, FluxOptions};
 use cleat::vc::VcStatus;
-use cleat::{ExportError, InputValue, Value, check_source, emit, export};
+use cleat::{ExportError, InputValue, Value, check_source, check_source_at, emit, export, export_at};
+use std::path::{Path, PathBuf};
 
 const PRELUDE: &str = r#"
 type Port = Int where 1 <= self && self <= 65535
@@ -45,11 +46,16 @@ fn yaml(s: &str, inputs: &[(&str, &str)]) -> String {
 
 #[test]
 fn webapp_example_checks_and_exports() {
-    let s = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/examples/webapp.cleat")).unwrap();
-    let out = check_source(&s);
+    let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("examples");
+    if !dir.join("../schemas/kubernetes-1.31.json").exists() {
+        eprintln!("skipping: run schemas/fetch.sh to download the Kubernetes schema");
+        return;
+    }
+    let s = std::fs::read_to_string(dir.join("webapp.cleat")).unwrap();
+    let out = check_source_at(&s, Some(&dir));
     assert!(out.errors.is_empty(), "{:#?}", out.errors);
     let inputs = vec![("env".into(), InputValue::Raw("prod".into())), ("image".into(), InputValue::Raw("api:1".into()))];
-    let Ok((_, comps)) = export(&s, inputs) else { panic!("export failed") };
+    let Ok((_, comps)) = export_at(&s, Some(&dir), inputs) else { panic!("export failed") };
     let docs = targets::argocd(&comps).unwrap();
     assert_eq!(docs.len(), 5);
     let wave = |d: &Value| d.get("metadata").and_then(|m| m.get("annotations")).and_then(|a| a.get(targets::SYNC_WAVE)).cloned();
@@ -75,7 +81,7 @@ fn defaults_and_singleton_fields_are_filled_in() {
     let out = yaml("export Svc { metadata.name: \"web\", spec.ports: [{ port: 80 }] }", &[]);
     assert_eq!(
         out,
-        "apiVersion: v1\nkind: Service\nmetadata:\n  name: web\nspec:\n  type: ClusterIP\n  ports:\n    - port: 80\n"
+        "apiVersion: v1\nkind: Service\nmetadata:\n  name: web\nspec:\n  ports:\n    - port: 80\n  type: ClusterIP\n"
     );
 }
 
@@ -288,4 +294,177 @@ fn yaml_block_strings() {
 fn base64() {
     assert_eq!(emit::base64(b"hello"), "aGVsbG8=");
     assert_eq!(emit::base64(b"hi!"), "aGkh");
+}
+
+// ---- imports: OpenAPI and CRDs ----
+
+/// Write fixture files into a fresh directory and return it.
+fn fixture_dir(name: &str, files: &[(&str, &str)]) -> PathBuf {
+    let dir = std::env::temp_dir().join(format!("cleat-test-{name}-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    for (f, content) in files {
+        std::fs::write(dir.join(f), content).unwrap();
+    }
+    dir
+}
+
+const SWAGGER: &str = r##"{
+  "swagger": "2.0",
+  "info": { "title": "Test", "version": "v1" },
+  "definitions": {
+    "io.test.api.web.v1.Site": {
+      "description": "A website.",
+      "x-kubernetes-group-version-kind": [{ "group": "web.test.io", "version": "v1", "kind": "Site" }],
+      "required": ["spec"],
+      "properties": {
+        "apiVersion": { "type": "string" },
+        "kind": { "type": "string" },
+        "spec": { "$ref": "#/definitions/io.test.api.web.v1.SiteSpec" }
+      }
+    },
+    "io.test.api.web.v1.SiteSpec": {
+      "required": ["host"],
+      "properties": {
+        "host": { "type": "string", "pattern": "^[a-z.]+$", "maxLength": 20, "description": "The host name." },
+        "port": { "$ref": "#/definitions/io.test.util.intstr.IntOrString" },
+        "replicas": { "type": "integer", "minimum": 1, "maximum": 10 },
+        "mode": { "type": "string", "enum": ["fast", "safe"] },
+        "tree": { "$ref": "#/definitions/io.test.api.web.v1.Node" }
+      }
+    },
+    "io.test.api.web.v1.Node": {
+      "properties": { "children": { "type": "array", "items": { "$ref": "#/definitions/io.test.api.web.v1.Node" } } }
+    },
+    "io.test.util.intstr.IntOrString": { "type": "string", "format": "int-or-string" },
+    "io.test.api.core.v1.Event": { "properties": { "a": { "type": "string" } } },
+    "io.test.api.other.v1.Event": { "properties": { "b": { "type": "string" } } },
+    "io.test.api.web.v1beta1.Site": { "properties": { "old": { "type": "boolean" } } }
+  }
+}"##;
+
+#[test]
+fn openapi_generation() {
+    let doc = cleat::json::parse(SWAGGER).unwrap();
+    let src = cleat::openapi::generate(&[doc]).unwrap().source;
+    for want in [
+        "type web.v1.Site = {",
+        "apiVersion: \"web.test.io/v1\",",
+        "kind: \"Site\",",
+        "host: Str where len(self) <= 20 && matches(self, \"^[a-z.]+$\"),",
+        "port?: intstr.IntOrString,",
+        "replicas?: Int where self >= 1 && self <= 10,",
+        "mode?: \"fast\" | \"safe\",",
+        "children?: [Json],", // the self-reference is broken to keep types finite
+        "type intstr.IntOrString = Int | Str",
+        "type Site = web.v1.Site", // GA beats v1beta1
+    ] {
+        assert!(src.contains(want), "missing `{want}` in:\n{src}");
+    }
+    assert!(!src.contains("type Event ="), "ambiguous short name was generated:\n{src}");
+}
+
+#[test]
+fn openapi_import_checks_and_exports() {
+    let dir = fixture_dir("openapi", &[("api.json", SWAGGER)]);
+    let check = |body: &str| check_source_at(&format!("import t from \"api.json\"\n{body}"), Some(&dir));
+    let errs = |body: &str| check(body).errors.into_iter().map(|e| e.msg).collect::<Vec<_>>().join("\n");
+
+    assert_eq!(errs("let s = t.Site { spec: { host: \"a.b\", port: 80, mode: \"fast\" } }"), "");
+    assert!(errs("let s = t.Site { spec: { hots: \"a\" } }").contains("unknown field `hots` in `t.web.v1.SiteSpec`; did you mean `host`?"));
+    assert!(errs("let s = t.Site { spec: { host: \"A\" } }").contains("refinement violated"));
+    assert!(errs("let s = t.Site { spec: { host: \"a\", mode: \"slow\" } }").contains("expected `\"fast\" | \"safe\"`"));
+    assert!(errs("let s = t.Site {}").contains("missing required field `spec`"));
+    assert!(errs("let e = t.Event {}").contains("`t.Event` is ambiguous; use one of `t.core.v1.Event`, `t.other.v1.Event`"));
+    assert!(errs("let s = t.Siet {}").contains("did you mean `t.Site`?"));
+
+    let src = "import t from \"api.json\"\ninput r: Int = 3\nexport t.Site { spec: { host: \"a\", replicas: r } }";
+    let Ok((_, comps)) = export_at(src, Some(&dir), vec![]) else { panic!() };
+    let out = emit::to_yaml_stream(&targets::plain(&comps));
+    assert_eq!(out, "apiVersion: web.test.io/v1\nkind: Site\nspec:\n  host: a\n  replicas: 3\n");
+    let Err(ExportError::Eval(es)) = export_at(src, Some(&dir), vec![("r".into(), InputValue::Raw("11".into()))]) else {
+        panic!()
+    };
+    assert!(es[0].msg.contains("11 does not satisfy `self >= 1 && self <= 10`"), "{}", es[0].msg);
+}
+
+#[test]
+fn imported_docs_show_on_hover() {
+    let dir = fixture_dir("hover", &[("api.json", SWAGGER)]);
+    let out = check_source_at("import t from \"api.json\"\nlet s = t.Site { spec: { host: \"a\" } }", Some(&dir));
+    let h = out.hovers.iter().find(|h| h.text.contains("host: Str")).expect("hover on `host`");
+    assert_eq!(h.doc.as_deref(), Some("The host name."));
+}
+
+const CRD: &str = r#"
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: widgets.example.com
+spec:
+  group: example.com
+  names: { kind: Widget, plural: widgets }
+  scope: Namespaced
+  versions:
+    - name: v1alpha1
+      served: true
+      storage: false
+      schema:
+        openAPIV3Schema:
+          type: object
+          properties:
+            spec: { type: object, properties: { size: { type: integer } } }
+    - name: v1
+      served: true
+      storage: true
+      schema:
+        openAPIV3Schema:
+          type: object
+          properties:
+            spec:
+              type: object
+              required: [size]
+              properties:
+                size: { type: integer, minimum: 1 }
+                color: { type: string, enum: [red, blue] }
+                port: { x-kubernetes-int-or-string: true }
+                parts:
+                  type: array
+                  items:
+                    type: object
+                    properties: { name: { type: string } }
+"#;
+
+#[test]
+fn crd_import() {
+    let dir = fixture_dir("crd", &[("widgets.yaml", CRD)]);
+    let src = cleat::modules::generate_source(&dir.join("widgets.yaml")).unwrap();
+    assert!(src.contains("type v1.WidgetSpec = {"), "{src}");
+    assert!(src.contains("parts?: [v1.WidgetSpecPartsItem],"), "{src}");
+    assert!(src.contains("type Widget = v1.Widget"), "storage version wins:\n{src}");
+
+    let errs = |body: &str| {
+        check_source_at(&format!("import w from \"widgets.yaml\"\n{body}"), Some(&dir))
+            .errors
+            .into_iter()
+            .map(|e| e.msg)
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+    assert_eq!(errs("let a = w.Widget { metadata.name: \"a\", spec: { size: 2, color: \"red\", port: \"http\", parts: [{ name: \"x\" }] } }"), "");
+    assert!(errs("let a = w.Widget { spec: { size: 2, color: \"green\" } }").contains("expected `\"red\" | \"blue\"`"));
+    assert!(errs("let a = w.Widget { spec: { color: \"red\" } }").contains("missing required field `size`"));
+    assert!(errs("let a = w.Widget { spec: { size: 0 } }").contains("refinement violated"));
+    assert!(errs("let a = w.v1alpha1.Widget { spec: { size: 0 } }").is_empty());
+
+    let Ok((_, comps)) = export_at("import w from \"widgets.yaml\"\nexport w.Widget { metadata.name: \"a\", spec.size: 1 }", Some(&dir), vec![]) else {
+        panic!()
+    };
+    let out = emit::to_yaml_stream(&targets::plain(&comps));
+    assert_eq!(out, "apiVersion: example.com/v1\nkind: Widget\nmetadata:\n  name: a\nspec:\n  size: 1\n");
+}
+
+#[test]
+fn import_errors() {
+    let out = check_source_at("import x from \"missing.json\"", Some(Path::new("/nonexistent")));
+    assert!(out.errors[0].msg.contains("import `x`: cannot read"), "{:?}", out.errors);
 }

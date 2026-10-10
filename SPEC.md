@@ -35,7 +35,9 @@ null | true | false | <int> | <float> | "<string>" | [v, ...] | { key: v, ... }
 
 - Ints are 64-bit and floats are IEEE doubles. Both serialize as JSON numbers.
 - Objects keep the order of their keys. When a value is checked against a
-  record type, declared fields come first, in declaration order.
+  record type, fields filled in from a single-literal type (`apiVersion`,
+  `kind`) come first, then the given fields in source order, then other
+  defaults.
 - Tuples are lists of fixed length.
 
 ## 3. Types
@@ -90,8 +92,8 @@ with a required `Never` field, and `T where false`, become `Never`.
 
 ## 4. Programs
 
-A file is a sequence of top-level items. Everything except type aliases must
-be declared before it is used.
+A file is a sequence of top-level items. Everything except type aliases and
+imports must be declared before it is used.
 
 ```ts
 type Env = "dev" | "staging" | "prod"
@@ -115,6 +117,48 @@ export { kind: "ConfigMap", ... }       // each `export` emits documents
   document. `export name (after a, b)? = e` exports a named **component** (§9).
 - Shadowing is allowed. Facts the checker knows about the outer variable are
   dropped while the inner one is in scope.
+
+### 4.1 Imports
+
+```ts
+import k8s from "../schemas/kubernetes-1.31.json"    // OpenAPI (Swagger 2 or OpenAPI 3)
+import cm from "./crds/cert-manager.crds.yaml"         // CustomResourceDefinitions
+import lib from "./types.cleat"                        // `type` declarations
+
+let d = k8s.Deployment { ... }
+fn issuer() -> cm.ClusterIssuer = ...
+```
+
+An import brings a module's types in under a namespace: `ns.T`. Paths are
+relative to the importing file. Imported modules may only declare types for
+now (no functions, `let`s or nested imports).
+
+Schemas are converted to Cleat types (`cleat gen <file>` prints the result):
+
+| Schema | Cleat type |
+|---|---|
+| `$ref` | the named type; a reference that closes a cycle becomes `Json` |
+| `type: object` with `properties` | exact record; fields not in `required` are optional (`?`) |
+| `additionalProperties: true`, `x-kubernetes-preserve-unknown-fields` | open record (`..`) |
+| `type: object` with `additionalProperties: T` | `{ [Str]: T }` |
+| `type: array` | `[T]` |
+| `enum` | union of literal types |
+| `x-kubernetes-int-or-string`, `format: int-or-string` | `Int \| Str` |
+| `pattern`, `minLength`, `maxLength` | `Str where ...` (patterns Rust's regex engine rejects are dropped) |
+| `minimum`, `maximum`, `exclusive*` | `Int where ...` / `Float where ...` |
+| `nullable: true` | `T \| null` |
+| `x-kubernetes-group-version-kind` | `apiVersion`/`kind` become required literal fields, so they fill themselves in |
+| Kubernetes `resource.Quantity` | `Str \| Float` (accepts `cpu: 1` and `cpu: "500m"`) |
+
+**Names.** OpenAPI definitions keep their group and version:
+`io.k8s.api.apps.v1.Deployment` becomes `apps.v1.Deployment`. A short name
+(`Deployment`) is added when one candidate is clearly preferred: GA over beta
+over alpha, then the higher version. When candidates tie (`core.v1.Event`
+and `events.v1.Event`), there is no short name, and using it is an error
+that lists the qualified names. CRD kinds are named `<version>.<Kind>`, with
+nested objects named after their path (`v1.CertificateSpec`). The short
+`Kind` points to the storage version. OpenAPI descriptions are shown on
+hover.
 
 ## 5. Expressions
 
@@ -265,15 +309,13 @@ dependencies reach the cluster:
 
 1. ~~Core language, evaluator, YAML/JSON output, typed inputs.~~ Done.
 2. ~~Components with `after`; Argo CD sync waves; Flux `dependsOn`.~~ Done.
-3. Kubernetes OpenAPI import: `import k8s from "k8s:1.31"` and CRDs, mapped to
-   record types (`apiVersion`/`kind` as literal fields, OpenAPI enums as
-   literal unions, `int-or-string` as `Int | Str`). **Next.**
+3. ~~OpenAPI and CRD import (§4.1).~~ Done.
 4. `e with { path: v }` typed patches, including list items selected by key
    (`containers[name == "api"]`).
 5. Argo CD config-management plugin: a `plugin.yaml`, and parameters
    announced to the Argo CD UI from the `input` declarations.
    (`--argocd-params` already reads `ARGOCD_APP_PARAMETERS`.)
-6. Modules and imports of local files.
+6. Functions and constants in imported modules; nested imports.
 
 ## 11. Open questions
 
@@ -285,3 +327,7 @@ dependencies reach the cluster:
   so they can't refer to inputs or `let`s. Is that the right rule?
 - Should components be able to set an explicit wave offset, or Flux options
   like `timeout`, per component?
+- The Kubernetes OpenAPI specs (v2 and v3) don't mark enum fields such as
+  `ServiceSpec.type`; should Cleat ship a curated list for the core API?
+- Recursive types: should aliases be allowed to be recursive, so schemas
+  like `JSONSchemaProps` keep their full structure instead of `Json`?

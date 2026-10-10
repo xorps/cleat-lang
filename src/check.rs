@@ -3,6 +3,7 @@
 
 use std::collections::HashSet;
 use std::collections::HashMap;
+use std::path::{Path, PathBuf};
 
 use crate::ast::*;
 use crate::diag::{Diag, Span};
@@ -27,6 +28,8 @@ pub struct Hover {
     /// Length in characters of the token at `span`.
     pub len: usize,
     pub text: String,
+    /// Documentation (Markdown), e.g. from OpenAPI descriptions.
+    pub doc: Option<String>,
 }
 
 #[derive(Clone)]
@@ -46,8 +49,10 @@ enum RPat {
     Record(Vec<(String, RPat)>, bool, Span),
 }
 
-pub fn check_program(items: &[Item]) -> Outcome {
+/// Check a program; imports are resolved relative to `base` (the file's directory).
+pub fn check_program(items: &[Item], base: Option<&Path>) -> Outcome {
     let mut c = Checker {
+        base: base.map(Path::to_path_buf),
         ctx: TypeCtx::default(),
         fns: HashMap::new(),
         scope: Vec::new(),
@@ -99,6 +104,7 @@ struct Checker {
     /// Names for anonymous nested types in messages (`Svc.spec.ports[]`), keyed by
     /// the span of the literal they describe.
     labels: Vec<(Span, String)>,
+    base: Option<PathBuf>,
     out: Outcome,
 }
 
@@ -148,7 +154,63 @@ impl Checker {
     }
 
     fn hover(&mut self, span: Span, token: &str, text: String) {
-        self.out.hovers.push(Hover { span, len: token.chars().count(), text });
+        self.out.hovers.push(Hover { span, len: token.chars().count(), text, doc: None });
+    }
+
+    fn hover_doc(&mut self, span: Span, token: &str, text: String, doc: Option<String>) {
+        self.out.hovers.push(Hover { span, len: token.chars().count(), text, doc });
+    }
+
+    /// Follow aliases that are just other names (`k8s.Deployment` -> `k8s.apps.v1.Deployment`).
+    fn canonical(&self, name: &str) -> String {
+        let mut n = name.to_string();
+        for _ in 0..8 {
+            match self.ctx.alias_src.get(&n).map(|te| &te.kind) {
+                Some(TypeKind::Named(m)) if self.ctx.alias_src.contains_key(m) => n = m.clone(),
+                _ => break,
+            }
+        }
+        n
+    }
+
+    fn type_doc(&self, alias: &str) -> Option<String> {
+        self.ctx.docs.get(&self.canonical(alias)).cloned()
+    }
+
+    fn field_doc(&self, record: &Ty, field: &str) -> Option<String> {
+        match self.norm(record) {
+            Ty::Alias(n) => self.ctx.docs.get(&format!("{}.{field}", self.canonical(&n))).cloned(),
+            _ => None,
+        }
+    }
+
+    /// Register an imported module's types as `ns.T`.
+    fn import(&mut self, ns: &str, path: &str, span: Span) {
+        let full = match &self.base {
+            Some(b) => b.join(path),
+            None => PathBuf::from(path),
+        };
+        let module = match crate::modules::load(&full) {
+            Ok(m) => m,
+            Err(e) => return self.error(span, format!("import `{ns}`: {e}")),
+        };
+        let prefix = format!("{ns}.");
+        if self.ctx.alias_src.keys().any(|k| k.starts_with(&prefix)) {
+            return self.error(span, format!("`{ns}` is already imported"));
+        }
+        let locals: HashSet<&str> = module
+            .types
+            .iter()
+            .filter_map(|i| if let Item::Type { name, .. } = i { Some(name.as_str()) } else { None })
+            .collect();
+        for item in &module.types {
+            if let Item::Type { name, ty, .. } = item {
+                self.ctx.alias_src.insert(format!("{prefix}{name}"), qualify(ty, &prefix, &locals));
+            }
+        }
+        for (k, d) in &module.docs {
+            self.ctx.docs.insert(format!("{prefix}{k}"), d.clone());
+        }
     }
 
     fn field_sig(f: &Field) -> String {
@@ -198,6 +260,11 @@ impl Checker {
 
     fn run(&mut self, items: &[Item]) {
         for item in items {
+            if let Item::Import { name, path, span } = item {
+                self.import(name, path, *span);
+            }
+        }
+        for item in items {
             if let Item::Type { name, ty, span } = item {
                 if BUILTIN_TYPES.contains(&name.as_str()) || self.ctx.alias_src.contains_key(name) {
                     self.error(*span, format!("type `{name}` is already defined"));
@@ -218,7 +285,7 @@ impl Checker {
         let mut components: Vec<(String, Span, Vec<(String, Span)>)> = Vec::new();
         for (index, item) in items.iter().enumerate() {
             match item {
-                Item::Type { .. } => {}
+                Item::Type { .. } | Item::Import { .. } => {}
                 Item::Input { name, ty, default, span } => {
                     let t = self.resolve_te(ty);
                     if let Some(d) = default {
@@ -387,7 +454,8 @@ impl Checker {
             TypeKind::Named(n) => {
                 if self.ctx.aliases.contains_key(n) {
                     let text = self.alias_text(n);
-                    self.hover(te.span, n, text);
+                    let doc = self.type_doc(n);
+                    self.hover_doc(te.span, n, text, doc);
                 }
             }
             TypeKind::Lit(_) => {}
@@ -575,6 +643,17 @@ impl Checker {
     // ---------- checking mode ----------
 
     fn check(&mut self, e: &Expr, expected: &Ty) {
+        // A literal object/list is never null: check it against the non-null part of
+        // an optional type (`T | null`), so errors stay field by field.
+        if matches!(e.kind, ExprKind::Object(_) | ExprKind::List(_) | ExprKind::Tuple(_)) {
+            let ms = self.union_members(expected);
+            if ms.len() > 1 && ms.iter().any(|m| self.is_null(m)) {
+                let non_null = self.union(ms.into_iter().filter(|m| !self.is_null(m)).collect());
+                if non_null != Ty::Never {
+                    return self.check(e, &non_null);
+                }
+            }
+        }
         // A refinement on a composite literal: check the shape field by field, then the predicate.
         if let Ty::Refine(base, pred) = self.ctx.unfold(&self.norm(expected)) {
             if matches!(e.kind, ExprKind::Object(_) | ExprKind::List(_) | ExprKind::Tuple(_)) {
@@ -710,7 +789,16 @@ impl Checker {
             }
             Ty::Union(us) => {
                 // Discriminated unions: pick the record member whose literal fields agree.
-                let candidates: Vec<Ty> = us.iter().filter(|u| self.object_may_be(ms, u)).cloned().collect();
+                let objects: Vec<Ty> = us
+                    .iter()
+                    .filter(|u| matches!(self.ctx.shape(u), Ty::Record(_) | Ty::Map(_) | Ty::Json))
+                    .cloned()
+                    .collect();
+                let candidates: Vec<Ty> = if objects.len() == 1 {
+                    objects
+                } else {
+                    objects.into_iter().filter(|u| self.object_may_be(ms, u)).collect()
+                };
                 if candidates.len() == 1 {
                     self.check_object(ms, &candidates[0], e);
                 } else {
@@ -753,8 +841,15 @@ impl Checker {
                 Member::Field(k, e, span) => match r.get(k) {
                     Some(f) => {
                         let text = format!("// {shown}\n{}", Self::field_sig(f));
-                        self.hover(*span, k, text);
-                        let ft = if f.presence == Presence::Optional {
+                        let doc = self.ctx.docs.get(&format!("{}.{k}", self.canonical(shown))).cloned();
+                        self.hover_doc(*span, k, text, doc);
+                        // A literal (other than `null`) can't be absent: check it against the plain field type.
+                        let literal = match &e.kind {
+                            ExprKind::Lit(l) => *l != Lit::Null,
+                            ExprKind::Interp(_) | ExprKind::Object(_) | ExprKind::List(_) | ExprKind::Tuple(_) => true,
+                            _ => false,
+                        };
+                        let ft = if f.presence == Presence::Optional && !literal {
                             Ty::Union(vec![f.ty.clone(), Ty::null()])
                         } else {
                             f.ty.clone()
@@ -945,21 +1040,29 @@ impl Checker {
                     (Ty::Record(r), Label::Name(k)) => r.get(k).map(|f| format!("// {bt}\n{}", Self::field_sig(f))),
                     _ => None,
                 };
+                let doc = match label {
+                    Label::Name(k) => self.field_doc(&bt, k),
+                    Label::Pos(_) => None,
+                };
                 let label_s = label.to_string();
-                self.hover(e.span, &label_s, field_text.unwrap_or_else(|| format!("{label}: {t}")));
+                self.hover_doc(e.span, &label_s, field_text.unwrap_or_else(|| format!("{label}: {t}")), doc);
                 t
             }
             ExprKind::Index(b, i) => self.synth_index(b, i, e.span),
             ExprKind::Call(name, args) => self.synth_call(name, args, e.span),
             ExprKind::Typed(tname, obj) => {
                 if !self.ctx.alias_src.contains_key(tname) {
-                    let hint = did_you_mean(tname, self.ctx.alias_src.keys().map(String::as_str));
-                    self.error(e.span, format!("unknown type `{tname}`{hint}"));
+                    let msg = self.ctx.unknown_type_message(tname);
+                    self.error(e.span, msg);
                     self.synth(obj);
                     return Ty::Error;
                 }
+                // Resolve it (and everything it refers to) before checking against it.
+                self.ctx.resolve(&TypeExpr { kind: TypeKind::Named(tname.clone()), span: e.span });
+                self.drain_type_diags();
                 let text = self.alias_text(tname);
-                self.hover(e.span, tname, text);
+                let doc = self.type_doc(tname);
+                self.hover_doc(e.span, tname, text, doc);
                 let t = Ty::Alias(tname.clone());
                 self.check(obj, &t);
                 t
@@ -1705,4 +1808,24 @@ fn merge_records(a: Rec, b: Rec) -> Rec {
         }
     }
     Rec { fields, open: a.open || b.open }
+}
+
+/// Rewrite references to a module's own types (`DeploymentSpec`) to their imported names (`k8s.DeploymentSpec`).
+fn qualify(te: &TypeExpr, prefix: &str, locals: &HashSet<&str>) -> TypeExpr {
+    let q = |t: &TypeExpr| qualify(t, prefix, locals);
+    let kind = match &te.kind {
+        TypeKind::Named(n) if locals.contains(n.as_str()) => TypeKind::Named(format!("{prefix}{n}")),
+        TypeKind::Named(n) => TypeKind::Named(n.clone()),
+        TypeKind::Lit(l) => TypeKind::Lit(l.clone()),
+        TypeKind::List(t) => TypeKind::List(Box::new(q(t))),
+        TypeKind::Map(t) => TypeKind::Map(Box::new(q(t))),
+        TypeKind::Tuple(ts) => TypeKind::Tuple(ts.iter().map(q).collect()),
+        TypeKind::Union(ts) => TypeKind::Union(ts.iter().map(q).collect()),
+        TypeKind::Refine(b, p) => TypeKind::Refine(Box::new(q(b)), p.clone()),
+        TypeKind::Record { fields, open } => TypeKind::Record {
+            fields: fields.iter().map(|f| FieldDecl { ty: q(&f.ty), ..f.clone() }).collect(),
+            open: *open,
+        },
+    };
+    TypeExpr { kind, span: te.span }
 }

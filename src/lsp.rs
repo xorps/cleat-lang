@@ -8,7 +8,8 @@ use std::panic::{AssertUnwindSafe, catch_unwind};
 use crate::check::{Hover, Outcome};
 use crate::diag::Span;
 use crate::eval::Value;
-use crate::{check_source, emit, json};
+use crate::{check_source_at, emit, json};
+use std::path::{Path, PathBuf};
 
 struct Doc {
     text: String,
@@ -78,7 +79,8 @@ pub fn run() -> io::Result<()> {
 }
 
 fn update(out: &mut impl Write, docs: &mut HashMap<String, Doc>, uri: String, text: String) -> io::Result<()> {
-    let result = catch_unwind(AssertUnwindSafe(|| check_source(&text)));
+    let base = uri_to_path(&uri).and_then(|p| p.parent().map(Path::to_path_buf));
+    let result = catch_unwind(AssertUnwindSafe(|| check_source_at(&text, base.as_deref())));
     let (diags, hovers) = match result {
         Ok(outcome) => (diagnostics(&text, &outcome), outcome.hovers),
         Err(_) => {
@@ -130,7 +132,12 @@ fn hover(doc: &Doc, params: &Value) -> Option<Value> {
         .iter()
         .filter(|h| h.span.line == line && h.span.col <= col && col < h.span.col + h.len as u32)
         .min_by_key(|h| h.len)?;
-    let contents = obj(vec![("kind", s("markdown")), ("value", s(&format!("```cleat\n{}\n```", h.text)))]);
+    let mut md = format!("```cleat\n{}\n```", h.text);
+    if let Some(doc) = &h.doc {
+        md.push_str("\n\n");
+        md.push_str(doc);
+    }
+    let contents = obj(vec![("kind", s("markdown")), ("value", s(&md))]);
     Some(obj(vec![("contents", contents), ("range", range(&doc.text, h.span, h.len))]))
 }
 
@@ -226,4 +233,24 @@ fn str_at(v: &Value, path: &[&str]) -> Option<String> {
         Value::Str(x) => Some(x.clone()),
         _ => None,
     }
+}
+
+/// `file:///a/b%20c.cleat` -> `/a/b c.cleat`.
+fn uri_to_path(uri: &str) -> Option<PathBuf> {
+    let rest = uri.strip_prefix("file://")?;
+    let bytes = rest.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' && i + 2 < bytes.len() {
+            if let Ok(b) = u8::from_str_radix(std::str::from_utf8(&bytes[i + 1..i + 3]).ok()?, 16) {
+                out.push(b);
+                i += 3;
+                continue;
+            }
+        }
+        out.push(bytes[i]);
+        i += 1;
+    }
+    Some(PathBuf::from(String::from_utf8(out).ok()?))
 }
