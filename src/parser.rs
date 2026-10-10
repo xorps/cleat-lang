@@ -56,9 +56,9 @@ fn binop(t: &Tok) -> Option<BinOp> {
 }
 
 /// Add `path: value` to an object's members, nesting dotted paths and merging
-/// into an existing object literal for the same key.
-fn insert_member(members: &mut Vec<Member>, path: &[String], value: Expr, span: Span) {
-    let key = &path[0];
+/// into an existing object literal for the same key. Each path segment keeps its own span.
+fn insert_member(members: &mut Vec<Member>, path: &[(String, Span)], value: Expr) {
+    let (key, span) = (&path[0].0, path[0].1);
     let idx = members
         .iter()
         .rposition(|m| matches!(m, Member::Field(k, Expr { kind: ExprKind::Object(_), .. }, _) if k == key));
@@ -68,7 +68,7 @@ fn insert_member(members: &mut Vec<Member>, path: &[String], value: Expr, span: 
                 let ms = nested_members(members, i);
                 for m in new {
                     match m {
-                        Member::Field(k, v, s) => insert_member(ms, &[k], v, s),
+                        Member::Field(k, v, s) => insert_member(ms, &[(k, s)], v),
                         other => ms.push(other),
                     }
                 }
@@ -81,7 +81,7 @@ fn insert_member(members: &mut Vec<Member>, path: &[String], value: Expr, span: 
         members.push(Member::Field(key.clone(), Expr::new(ExprKind::Object(Vec::new()), span), span));
         members.len() - 1
     });
-    insert_member(nested_members(members, i), &path[1..], value, span);
+    insert_member(nested_members(members, i), &path[1..], value);
 }
 
 fn nested_members(members: &mut [Member], i: usize) -> &mut Vec<Member> {
@@ -477,6 +477,7 @@ impl Parser {
                 Tok::Dot | Tok::QDot => {
                     let optional = *self.peek() == Tok::QDot;
                     self.bump();
+                    let span = self.span(); // the label, so hover and errors point at it
                     let label = match self.peek().clone() {
                         Tok::Int(n) if n >= 0 => {
                             self.bump();
@@ -485,7 +486,6 @@ impl Parser {
                         _ if self.is_key_start() => Label::Name(self.key()?.0),
                         _ => return self.err("field name or tuple index"),
                     };
-                    let span = e.span;
                     e = Expr::new(ExprKind::Field(Box::new(e), label, optional), span);
                 }
                 Tok::LBracket => {
@@ -731,21 +731,21 @@ impl Parser {
             }
             _ => {
                 let (first, span) = self.key()?;
-                let mut path = vec![first];
+                let mut path = vec![(first, span)];
                 while self.eat(&Tok::Dot) {
-                    path.push(self.key()?.0);
+                    path.push(self.key()?);
                 }
                 if *self.peek() != Tok::Colon && path.len() == 1 {
                     // Punning: `{ name }` means `{ name: name }`.
                     if matches!(self.peek(), Tok::Comma | Tok::RBrace) {
-                        let v = Expr::var(&path[0], span);
-                        insert_member(members, &path, v, span);
+                        let v = Expr::var(&path[0].0, span);
+                        insert_member(members, &path, v);
                         return Ok(());
                     }
                 }
                 self.expect(&Tok::Colon)?;
                 let value = self.expr_s()?;
-                insert_member(members, &path, value, span);
+                insert_member(members, &path, value);
             }
         }
         Ok(())

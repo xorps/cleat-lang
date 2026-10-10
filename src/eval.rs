@@ -898,6 +898,33 @@ pub const BUILTINS: [&str; 20] = [
     "replace", "matches", "min", "max", "to_json", "to_yaml", "b64encode", "error", "sort",
 ];
 
+/// Signature and one-line description of a built-in, for hover.
+pub fn builtin_doc(name: &str) -> &'static str {
+    match name {
+        "len" => "len(x: Str | [Json] | { [Str]: Json }) -> Int\n// characters, elements or keys",
+        "keys" => "keys(o: { [Str]: Json }) -> [Str]",
+        "values" => "values(o: { [Str]: T }) -> [T]",
+        "str" => "str(x: Str | Float | Bool | null) -> Str",
+        "upper" => "upper(s: Str) -> Str",
+        "lower" => "lower(s: Str) -> Str",
+        "join" => "join(xs: [Str], sep: Str) -> Str",
+        "split" => "split(s: Str, sep: Str) -> [Str]",
+        "contains" => "contains(s: Str, sub: Str) -> Bool\ncontains(xs: [T], x: T) -> Bool",
+        "starts_with" => "starts_with(s: Str, prefix: Str) -> Bool",
+        "ends_with" => "ends_with(s: Str, suffix: Str) -> Bool",
+        "replace" => "replace(s: Str, from: Str, to: Str) -> Str",
+        "matches" => "matches(s: Str, regex: Str) -> Bool\n// unanchored; use ^ and $ to match the whole string",
+        "min" => "min(a: Float, b: Float) -> Float  // Int if both are Int",
+        "max" => "max(a: Float, b: Float) -> Float  // Int if both are Int",
+        "sort" => "sort(xs: [Str] | [Float]) -> same type",
+        "to_json" => "to_json(v: Json) -> Str",
+        "to_yaml" => "to_yaml(v: Json) -> Str",
+        "b64encode" => "b64encode(s: Str) -> Str",
+        "error" => "error(msg: Str) -> Never\n// aborts evaluation with msg",
+        _ => "",
+    }
+}
+
 fn builtin(name: &str, args: Vec<Value>) -> Result<Value, String> {
     use Value::*;
     let bad = |args: &[Value]| {

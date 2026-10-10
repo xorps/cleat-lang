@@ -1,0 +1,69 @@
+{
+  "name": "cleat",
+  "displayName": "Cleat",
+  "description": "Cleat language support: diagnostics, hover, syntax highlighting, and live output preview.",
+  "publisher": "cleat-lang",
+  "version": "0.1.0",
+  "license": "UNLICENSED",
+  "engines": {
+    "vscode": "^1.80.0"
+  },
+  "categories": ["Programming Languages"],
+  "main": "./extension.js",
+  "activationEvents": ["onLanguage:cleat"],
+  "contributes": {
+    "languages": [
+      {
+        "id": "cleat",
+        "aliases": ["Cleat", "cleat"],
+        "extensions": [".cleat"],
+        "configuration": "./language-configuration.json"
+      }
+    ],
+    "grammars": [
+      {
+        "language": "cleat",
+        "scopeName": "source.cleat",
+        "path": "./syntaxes/cleat.tmLanguage.json"
+      }
+    ],
+    "commands": [
+      {
+        "command": "cleat.showOutput",
+        "title": "Show Output",
+        "category": "Cleat",
+        "icon": "$(open-preview)"
+      },
+      {
+        "command": "cleat.restartServer",
+        "title": "Restart Language Server",
+        "category": "Cleat"
+      }
+    ],
+    "menus": {
+      "editor/title": [
+        {
+          "command": "cleat.showOutput",
+          "when": "editorLangId == cleat",
+          "group": "navigation"
+        }
+      ]
+    },
+    "configuration": {
+      "title": "Cleat",
+      "properties": {
+        "cleat.serverPath": {
+          "type": "string",
+          "default": "",
+          "description": "Path to the `cleat` binary. Empty: use target/debug/cleat or target/release/cleat in the workspace, else `cleat` on PATH."
+        },
+        "cleat.exportArgs": {
+          "type": "array",
+          "items": { "type": "string" },
+          "default": [],
+          "description": "Extra arguments for `cleat export` in the output preview, e.g. [\"--set\", \"env=dev\", \"--target\", \"argocd\"]. A `<file>.inputs.json` next to the file is passed as --input automatically."
+        }
+      }
+    }
+  }
+}

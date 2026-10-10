@@ -7,6 +7,7 @@ pub mod emit;
 pub mod eval;
 pub mod json;
 pub mod lexer;
+pub mod lsp;
 pub mod parser;
 pub mod targets;
 pub mod types;

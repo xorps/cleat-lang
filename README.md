@@ -16,6 +16,25 @@ cargo build
 cargo test
 ```
 
+## Editor support
+
+`cleat lsp` is a Language Server (stdio) with diagnostics as you type and
+hover for types, fields and functions; it works with any LSP client.
+
+For VS Code (no npm needed):
+
+```sh
+cargo build
+editors/vscode/package.sh
+code --install-extension editors/vscode/cleat.vsix --force
+```
+
+The extension uses `target/debug/cleat` from the open workspace, or
+`cleat.serverPath`. **Cleat: Show Output** (the preview icon in the editor
+title bar) opens the exported YAML beside the file and refreshes on save.
+Inputs come from `<file>.inputs.json` next to the file and the
+`cleat.exportArgs` setting.
+
 ## What fails, and when
 
 | Mistake | Caught by | Message |
@@ -38,6 +57,8 @@ cargo test
 | `src/eval.rs` | Evaluator, input decoding, runtime type checks with defaults |
 | `src/emit.rs`, `src/json.rs` | YAML/JSON output with safe quoting; JSON input parsing |
 | `src/targets.rs` | `plain`, `argocd` (sync waves), `flux` (`dependsOn`) |
+| `src/lsp.rs` | Language server: diagnostics and hover |
+| `editors/vscode/` | VS Code extension: highlighting, LSP client, output preview |
 
 Next up: Kubernetes OpenAPI import, so `Deployment`, `Service` and CRDs come
 with real types instead of hand-written ones.

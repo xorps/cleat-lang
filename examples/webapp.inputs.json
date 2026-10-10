@@ -1,0 +1,4 @@
+{
+  "env": "dev",
+  "image": "ghcr.io/acme/api:1.4.2"
+}
