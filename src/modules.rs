@@ -11,10 +11,12 @@ use crate::ast::Item;
 use crate::{json, openapi, parser, yaml};
 
 pub struct Module {
-    /// `type` declarations with module-local names.
-    pub types: Vec<Item>,
+    /// The module's items. Schema modules contain only `type` declarations.
+    pub items: Vec<Item>,
     /// Documentation keyed by local `Type` or `Type.field`.
     pub docs: Vec<(String, String)>,
+    /// A `.cleat` source module (checked and evaluated on its own), as opposed to a schema.
+    pub is_source: bool,
 }
 
 type Cache = Mutex<HashMap<PathBuf, (SystemTime, Arc<Module>)>>;
@@ -52,7 +54,8 @@ fn read_docs(path: &Path) -> Result<Vec<crate::Value>, String> {
 }
 
 fn load_uncached(path: &Path) -> Result<Module, String> {
-    let (source, docs) = if path.extension().and_then(|e| e.to_str()) == Some("cleat") {
+    let is_source = path.extension().and_then(|e| e.to_str()) == Some("cleat");
+    let (source, docs) = if is_source {
         let text = std::fs::read_to_string(path).map_err(|e| format!("cannot read `{}`: {e}", path.display()))?;
         (text, Vec::new())
     } else {
@@ -61,17 +64,22 @@ fn load_uncached(path: &Path) -> Result<Module, String> {
     };
     let items = parser::parse_program(&source)
         .map_err(|d| format!("`{}`:{}: {}", path.display(), d.span, d.msg))?;
-    let mut types = Vec::new();
-    for item in items {
+    for item in &items {
         match item {
-            Item::Type { .. } => types.push(item),
-            Item::Import { .. } | Item::Refine { .. } => {
-                return Err(format!("`{}`: imported modules cannot import or refine other modules yet", path.display()));
+            Item::Input { .. } => {
+                return Err(format!(
+                    "`{}`: a module cannot declare `input`s; take values as function parameters instead",
+                    path.display()
+                ));
             }
-            _ => {
-                return Err(format!("`{}`: only `type` declarations can be imported for now", path.display()));
+            Item::Export { .. } => {
+                return Err(format!(
+                    "`{}`: a module cannot `export`; return documents from functions instead",
+                    path.display()
+                ));
             }
+            _ => {}
         }
     }
-    Ok(Module { types, docs })
+    Ok(Module { items, docs, is_source })
 }

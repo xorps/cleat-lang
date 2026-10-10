@@ -59,6 +59,6 @@ pub fn export_at(
     if !outcome.errors.is_empty() {
         return Err(ExportError::Check(outcome));
     }
-    let comps = eval::run(&items, outcome.ctx.clone(), inputs).map_err(ExportError::Eval)?;
+    let comps = eval::run(&items, outcome.ctx.clone(), base, inputs).map_err(ExportError::Eval)?;
     Ok((outcome, comps))
 }

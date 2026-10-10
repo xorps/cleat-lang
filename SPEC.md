@@ -123,15 +123,25 @@ export { kind: "ConfigMap", ... }       // each `export` emits documents
 ```ts
 import k8s from "../schemas/kubernetes-1.31.json"    // OpenAPI (Swagger 2 or OpenAPI 3)
 import cm from "./crds/cert-manager.crds.yaml"         // CustomResourceDefinitions
-import lib from "./types.cleat"                        // `type` declarations
+import lib from "./lib/base.cleat"                     // a Cleat module
 
 let d = k8s.Deployment { ... }
 fn issuer() -> cm.ClusterIssuer = ...
+let docs = lib.app("api", image)                       // functions: `ns.f(...)`
+let team = lib.team                                    // constants: `ns.x`
 ```
 
-An import brings a module's types in under a namespace: `ns.T`. Paths are
-relative to the importing file. Imported modules may only declare types for
-now (no functions, `let`s or nested imports).
+An import brings a module in under a namespace. Paths are relative to the
+importing file.
+
+A **Cleat module** may contain types, functions, `let`s, its own imports and
+`refine`s. It may not declare `input`s or `export`s: values come in as
+function parameters and leave as return values. A module is checked on its
+own; its errors are reported at the `import` line of the importer, with the
+module's file and position. Everything it defines appears as `ns.name`,
+including what it imported (`lib.k8s.Deployment`). A module's `refine`s
+apply to its own view of a schema (`lib.k8s.*`), not to the importer's.
+Import cycles are errors.
 
 Schemas are converted to Cleat types (`cleat gen <file>` prints the result):
 
@@ -254,7 +264,49 @@ match r {
 }
 ```
 
-### 5.4 Built-in functions
+### 5.4 Patching values: `with`
+
+`e with { ... }` returns a copy of `e` with changes applied. It is how
+environments specialize a shared base (the role of Kustomize overlays):
+
+```ts
+import base from "./base.cleat"
+
+export base.app("api", image) with {
+  [kind: "Deployment"].spec.replicas: 3,                                    // set
+  [kind: "Deployment"].metadata.labels +: { tier: "prod" },                 // merge
+  [kind: "Deployment"].spec.template.spec.containers[name: "api"].env +: [{ name: "LOG", value: "warn" }],
+  [kind: "Service"].spec.type: "LoadBalancer",
+  -[kind: "Deployment"].spec.strategy,                                      // remove
+}
+```
+
+| Entry | Effect |
+|---|---|
+| `path: v` | Set the value at `path`, creating missing objects on the way. |
+| `path +: v` | Merge: lists append; objects follow JSON Merge Patch (RFC 7386): nested objects merge, `null` removes a key, other values replace. |
+| `-path` | Remove a field, or the selected list elements. |
+
+| Path segment | Selects |
+|---|---|
+| `.f` | a field |
+| `[]` | every list element or map value |
+| `[2]` | one list element |
+| `[name: "api", ...]` | the list elements whose fields equal these values |
+
+A selector that matches no element is an error, not a no-op, so a misspelled
+`[name: "apii"]` can't silently do nothing. When the selector values are
+literals and the element types are known, this is caught by `cleat check`.
+
+**Typing.** Inside a declared type (a named type such as `k8s.Deployment`),
+every entry is checked against that type and the result keeps the type:
+unknown fields are errors with suggestions, values must fit, and required
+fields cannot be removed. Selectors with literal values narrow a list of
+mixed kinds (`[kind: "Service"]` patches only the `Service` members). In
+anonymous objects, the result type is updated structurally (`{ n: 1 } with
+{ n: "one" }` has type `{ n: "one" }`).
+
+### 5.5 Built-in functions
 
 `len`, `keys`, `values`, `str`, `upper`, `lower`, `join`, `split`,
 `contains`, `starts_with`, `ends_with`, `replace`, `matches` (regex), `min`,
@@ -346,12 +398,11 @@ dependencies reach the cluster:
 1. ~~Core language, evaluator, YAML/JSON output, typed inputs.~~ Done.
 2. ~~Components with `after`; Argo CD sync waves; Flux `dependsOn`.~~ Done.
 3. ~~OpenAPI and CRD import (§4.1).~~ Done.
-4. `e with { path: v }` typed patches, including list items selected by key
-   (`containers[name == "api"]`).
+4. ~~`e with { ... }` value patches with key selectors (§5.4).~~ Done.
 5. Argo CD config-management plugin: a `plugin.yaml`, and parameters
    announced to the Argo CD UI from the `input` declarations.
    (`--argocd-params` already reads `ARGOCD_APP_PARAMETERS`.)
-6. Functions and constants in imported modules; nested imports.
+6. ~~Functions, constants, imports and refines in imported modules.~~ Done.
 
 ## 11. Open questions
 

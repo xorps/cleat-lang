@@ -18,6 +18,9 @@ pub struct Outcome {
     pub vcs: Vec<Vc>,
     /// Hover text for identifiers, fields and keys (for the language server).
     pub hovers: Vec<Hover>,
+    /// What this program offers when imported as a module.
+    pub fns: Vec<(String, Signature)>,
+    pub globals: Vec<(String, Ty)>,
     /// Resolved type aliases, for the evaluator.
     pub ctx: TypeCtx,
 }
@@ -30,6 +33,56 @@ pub struct Hover {
     pub text: String,
     /// Documentation (Markdown), e.g. from OpenAPI descriptions.
     pub doc: Option<String>,
+}
+
+/// A function signature as seen by importers.
+#[derive(Debug, Clone)]
+pub struct Signature {
+    pub params: Vec<(String, Ty, Option<Expr>)>,
+    pub ret: Ty,
+}
+
+/// A checked `.cleat` module, cached by path and modification time.
+pub struct CheckedModule {
+    pub outcome: Outcome,
+}
+
+type CheckedCache = std::sync::Mutex<HashMap<PathBuf, (std::time::SystemTime, std::sync::Arc<CheckedModule>)>>;
+
+thread_local! {
+    /// Modules being checked, innermost last (for import cycle detection).
+    static CHECKING: std::cell::RefCell<Vec<PathBuf>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// Check a `.cleat` module on its own (its imports resolve relative to its directory).
+pub fn checked_module(path: &Path) -> Result<std::sync::Arc<CheckedModule>, String> {
+    static CACHE: std::sync::OnceLock<CheckedCache> = std::sync::OnceLock::new();
+    let cache = CACHE.get_or_init(Default::default);
+    let canon = path.canonicalize().map_err(|e| format!("cannot read `{}`: {e}", path.display()))?;
+    let mtime = std::fs::metadata(&canon).and_then(|m| m.modified()).unwrap_or(std::time::SystemTime::UNIX_EPOCH);
+    if let Some((t, c)) = cache.lock().unwrap().get(&canon) {
+        if *t == mtime {
+            return Ok(c.clone());
+        }
+    }
+    let cycle = CHECKING.with(|s| {
+        let s = s.borrow();
+        s.iter().position(|p| *p == canon).map(|i| {
+            let mut names: Vec<String> = s[i..].iter().map(|p| p.display().to_string()).collect();
+            names.push(canon.display().to_string());
+            names.join(" -> ")
+        })
+    });
+    if let Some(c) = cycle {
+        return Err(format!("import cycle: {c}"));
+    }
+    let module = crate::modules::load(&canon)?;
+    CHECKING.with(|s| s.borrow_mut().push(canon.clone()));
+    let outcome = check_program(&module.items, canon.parent());
+    CHECKING.with(|s| s.borrow_mut().pop());
+    let checked = std::sync::Arc::new(CheckedModule { outcome });
+    cache.lock().unwrap().insert(canon, (mtime, checked.clone()));
+    Ok(checked)
 }
 
 #[derive(Clone)]
@@ -60,9 +113,22 @@ pub fn check_program(items: &[Item], base: Option<&Path>) -> Outcome {
         cur_fn: "<top level>".into(),
         cur_index: None,
         labels: Vec::new(),
+        namespaces: HashSet::new(),
+        global_names: Vec::new(),
+        patch_path: String::new(),
         out: Outcome::default(),
     };
     c.run(items);
+    let mut fns: Vec<(String, Signature)> =
+        c.fns.iter().map(|(n, s)| (n.clone(), Signature { params: s.params.clone(), ret: s.ret.clone() })).collect();
+    fns.sort_by(|a, b| a.0.cmp(&b.0));
+    c.out.fns = fns;
+    let globals: Vec<(String, Ty)> = c
+        .global_names
+        .iter()
+        .filter_map(|n| c.scope.iter().rev().find(|(s, _)| s == n).map(|(_, t)| (n.clone(), t.clone())))
+        .collect();
+    c.out.globals = globals;
     let mut out = c.out;
     out.ctx = c.ctx;
     out.errors.sort_by_key(|d| (d.span.line, d.span.col));
@@ -104,6 +170,12 @@ struct Checker {
     /// Names for anonymous nested types in messages (`Svc.spec.ports[]`), keyed by
     /// the span of the literal they describe.
     labels: Vec<(Span, String)>,
+    /// Imported namespaces (`import ns from ...`).
+    namespaces: HashSet<String>,
+    /// Top-level `let`s and `input`s, offered to importers.
+    global_names: Vec<String>,
+    /// The `with` path being checked, for messages.
+    patch_path: String,
     base: Option<PathBuf>,
     out: Outcome,
 }
@@ -212,20 +284,23 @@ impl Checker {
             Some(b) => b.join(path),
             None => PathBuf::from(path),
         };
+        if !self.namespaces.insert(ns.to_string()) {
+            return self.error(span, format!("`{ns}` is already imported"));
+        }
         let module = match crate::modules::load(&full) {
             Ok(m) => m,
             Err(e) => return self.error(span, format!("import `{ns}`: {e}")),
         };
-        let prefix = format!("{ns}.");
-        if self.ctx.alias_src.keys().any(|k| k.starts_with(&prefix)) {
-            return self.error(span, format!("`{ns}` is already imported"));
+        if module.is_source {
+            return self.import_source(ns, &full, span);
         }
+        let prefix = format!("{ns}.");
         let locals: HashSet<&str> = module
-            .types
+            .items
             .iter()
             .filter_map(|i| if let Item::Type { name, .. } = i { Some(name.as_str()) } else { None })
             .collect();
-        for item in &module.types {
+        for item in &module.items {
             if let Item::Type { name, ty, .. } = item {
                 self.ctx.alias_src.insert(format!("{prefix}{name}"), qualify(ty, &prefix, &locals));
             }
@@ -233,6 +308,50 @@ impl Checker {
         for (k, d) in &module.docs {
             self.ctx.docs.insert(format!("{prefix}{k}"), d.clone());
         }
+    }
+
+    /// Import a `.cleat` module: its types, functions and constants become `ns.x`.
+    fn import_source(&mut self, ns: &str, full: &Path, span: Span) {
+        let checked = match checked_module(full) {
+            Ok(c) => c,
+            Err(e) => return self.error(span, format!("import `{ns}`: {e}")),
+        };
+        let out = &checked.outcome;
+        for e in out.errors.iter().take(5) {
+            self.error(span, format!("import `{ns}`: {}:{}: {}", full.display(), e.span, e.msg));
+        }
+        let prefix = format!("{ns}.");
+        let keys: HashSet<&str> = out.ctx.alias_src.keys().map(String::as_str).collect();
+        let q = |t: &Ty| t.map_aliases(&|n| keys.contains(n).then(|| format!("{prefix}{n}")));
+        for (name, te) in &out.ctx.alias_src {
+            self.ctx.alias_src.insert(format!("{prefix}{name}"), qualify(te, &prefix, &keys));
+        }
+        for (k, d) in &out.ctx.docs {
+            self.ctx.docs.insert(format!("{prefix}{k}"), d.clone());
+        }
+        for (name, sig) in &out.fns {
+            let params = sig.params.iter().map(|(p, t, d)| (p.clone(), q(t), d.clone())).collect();
+            self.fns.insert(format!("{prefix}{name}"), FnSig { params, ret: q(&sig.ret), index: usize::MAX });
+        }
+        for (name, t) in &out.globals {
+            let t = q(t);
+            self.scope.push((format!("{prefix}{name}"), t));
+        }
+        // Resolve the types the signatures and constants mention, so they are checked against.
+        let mut names = Vec::new();
+        for (_, sig) in &out.fns {
+            for (_, t, _) in &sig.params {
+                q(t).alias_names(&mut names);
+            }
+            q(&sig.ret).alias_names(&mut names);
+        }
+        for (_, t) in &out.globals {
+            q(t).alias_names(&mut names);
+        }
+        for n in names {
+            self.ctx.resolve(&TypeExpr { kind: TypeKind::Named(n), span });
+        }
+        self.drain_type_diags();
     }
 
     fn field_sig(f: &Field) -> String {
@@ -324,6 +443,7 @@ impl Checker {
                         self.check(d, &t);
                     }
                     self.bind_var(name, t, *span);
+                    self.global_names.push(name.clone());
                 }
                 Item::Let { name, ty, value, span } => {
                     let t = match ty {
@@ -335,6 +455,7 @@ impl Checker {
                         None => self.synth(value),
                     };
                     self.bind_let(name, t, value, *span);
+                    self.global_names.push(name.clone());
                 }
                 Item::Fn(f) => self.check_fn(f, index),
                 Item::Export { name, after, value, span } => {
@@ -739,6 +860,14 @@ impl Checker {
                 self.check(body, expected);
                 self.reset(m);
             }
+            ExprKind::With(b, patches) => {
+                // The result has the expected type: check the base and every patch against it.
+                self.check(b, expected);
+                for p in patches {
+                    self.patch_path = fmt_path(&p.path);
+                    self.patch_value(expected, &p.path, &p.op, p.span, true);
+                }
+            }
             ExprKind::Match(s, arms) => {
                 self.do_match(s, arms, Some(expected), e.span);
             }
@@ -1091,6 +1220,22 @@ impl Checker {
                 }
             }
             ExprKind::Field(b, label, optional) => {
+                // `ns.x`: a constant from an imported module.
+                if let Some(q) = qualified_name(e) {
+                    let root = q.split('.').next().unwrap_or("");
+                    if self.lookup(root).is_none() && self.namespaces.contains(root) {
+                        if let Some(t) = self.lookup(&q).cloned() {
+                            let label_s = label.to_string();
+                            self.hover(e.span, &label_s, format!("{q}: {t}"));
+                            return t;
+                        }
+                        let candidates: Vec<String> =
+                            self.scope.iter().map(|(n, _)| n.clone()).filter(|n| n.starts_with(&format!("{root}."))).collect();
+                        let hint = did_you_mean(&q, candidates.iter().map(String::as_str));
+                        self.error(e.span, format!("module `{root}` has no value `{}`{hint}", &q[root.len() + 1..]));
+                        return Ty::Error;
+                    }
+                }
                 let bt = self.synth(b);
                 let t = self.field_ty(&bt, b, label, *optional, e.span);
                 let field_text = match (self.ctx.shape(&bt), label) {
@@ -1158,6 +1303,14 @@ impl Checker {
                 bt
             }
             ExprKind::Match(s, arms) => self.do_match(s, arms, None, e.span),
+            ExprKind::With(b, patches) => {
+                let mut t = self.synth(b);
+                for p in patches {
+                    self.patch_path = fmt_path(&p.path);
+                    t = self.patch_value(&t, &p.path, &p.op, p.span, false);
+                }
+                t
+            }
         }
     }
 
@@ -1476,6 +1629,352 @@ impl Checker {
                 Ty::Bool
             }
             And | Or | Coalesce => unreachable!(),
+        }
+    }
+
+    // ---------- value patches (`e with { ... }`) ----------
+
+    /// Type the patch `path op` applied to a value of type `t`, returning the result type.
+    /// Inside a declared (named) type, patches are checked against it and the type is kept;
+    /// in anonymous object types, the type is updated structurally.
+    fn patch_value(&mut self, t: &Ty, path: &[PathSeg], op: &ValueOp, span: Span, declared: bool) -> Ty {
+        self.patch_value_in(t, path, op, span, declared, None)
+    }
+
+    /// `name` is the nearest type name (or `Type.field` path) for messages.
+    fn patch_value_in(
+        &mut self,
+        t: &Ty,
+        path: &[PathSeg],
+        op: &ValueOp,
+        span: Span,
+        declared: bool,
+        name: Option<&str>,
+    ) -> Ty {
+        let Some((seg, rest)) = path.split_first() else { return t.clone() };
+        let tn = self.norm(t);
+        let shown = match name {
+            Some(n) => n.to_string(),
+            None if tn.to_string().len() <= 48 => tn.to_string(),
+            None => "the value".to_string(),
+        };
+        let fail = |c: &mut Self, msg: String| {
+            let full = c.patch_path.clone();
+            c.error(span, format!("`{full}`: {msg}"));
+            if let ValueOp::Set(v) | ValueOp::Merge(v) = op {
+                c.synth(v);
+            }
+            Ty::Error
+        };
+        if let PathSeg::Select(keys) = seg {
+            // Selector values are ordinary expressions.
+            for (_, v) in keys {
+                self.synth(v);
+            }
+        }
+        match self.ctx.unfold(&tn) {
+            Ty::Error | Ty::Json => {
+                if let ValueOp::Set(v) | ValueOp::Merge(v) = op {
+                    self.synth(v);
+                }
+                tn
+            }
+            _ if matches!(tn, Ty::Alias(_)) => {
+                // Entering a named type: check against it, keep the name.
+                let inner = self.ctx.unfold(&tn);
+                let alias = match &tn {
+                    Ty::Alias(n) => n.clone(),
+                    _ => unreachable!(),
+                };
+                let r = self.patch_value_in(&inner, path, op, span, true, Some(&alias));
+                if r == Ty::Error { Ty::Error } else { tn }
+            }
+            // Patching may break a refinement of the whole value, so the result drops it.
+            Ty::Refine(b, _) => self.patch_value_in(&b, path, op, span, declared, name),
+            Ty::Union(ms) if ms.contains(&Ty::null()) => {
+                let non_null: Vec<Ty> = ms.iter().filter(|m| **m != Ty::null()).cloned().collect();
+                let patched: Vec<Ty> =
+                    non_null.iter().map(|m| self.patch_value_in(m, path, op, span, declared, name)).collect();
+                let mut out = patched;
+                if matches!(op, ValueOp::Remove) {
+                    out.push(Ty::null());
+                }
+                self.union(out)
+            }
+            Ty::Union(ms) => {
+                // A union of objects (e.g. different resource kinds): patch the members that have the path.
+                let (cands, others): (Vec<Ty>, Vec<Ty>) = ms.into_iter().partition(|m| self.has_seg(m, seg));
+                if cands.is_empty() {
+                    return fail(self, format!("no member of `{shown}` has `{seg}`"));
+                }
+                let mut out: Vec<Ty> = cands.iter().map(|m| self.patch_value_in(m, path, op, span, declared, None)).collect();
+                if declared {
+                    return tn;
+                }
+                out.extend(others);
+                self.union(out)
+            }
+            Ty::Record(mut r) => {
+                let PathSeg::Field(k) = seg else {
+                    return fail(self, format!("`{seg}` applies to lists, but `{shown}` is an object"));
+                };
+                let Some(i) = r.fields.iter().position(|f| f.name == *k) else {
+                    if declared && !r.open {
+                        let hint = did_you_mean(k, r.fields.iter().map(|f| f.name.as_str()));
+                        return fail(self, format!("`{shown}` has no field `{k}`{hint}"));
+                    }
+                    if matches!(op, ValueOp::Remove) {
+                        if !r.open {
+                            return fail(self, format!("`{shown}` has no field `{k}`"));
+                        }
+                        return Ty::Record(r);
+                    }
+                    // Add the field (creating nested objects for the rest of the path).
+                    let vt = self.new_path_ty(rest, op);
+                    if !declared {
+                        r.fields.push(Field { name: k.clone(), ty: vt, presence: Presence::Required });
+                    }
+                    return Ty::Record(r);
+                };
+                if rest.is_empty() {
+                    let f = r.fields[i].clone();
+                    match op {
+                        ValueOp::Remove if declared && f.presence == Presence::Required => {
+                            return fail(self, format!("`{k}` is required in `{shown}` and cannot be removed"));
+                        }
+                        ValueOp::Remove => {
+                            if !declared {
+                                r.fields.remove(i);
+                            }
+                        }
+                        ValueOp::Set(v) => {
+                            if declared {
+                                let label = format!("{shown}.{k}");
+                                self.check_labeled(v, &f.ty, label);
+                            } else {
+                                r.fields[i].ty = self.synth(v);
+                                r.fields[i].presence = Presence::Required;
+                            }
+                        }
+                        ValueOp::Merge(v) => {
+                            let nt = self.merge_ty(&f.ty, v, declared, span);
+                            if !declared {
+                                r.fields[i].ty = nt;
+                                r.fields[i].presence = Presence::Required;
+                            }
+                        }
+                    }
+                } else {
+                    let child = format!("{shown}.{k}");
+                    let nt = self.patch_value_in(&r.fields[i].read_ty(), rest, op, span, declared, Some(&child));
+                    if !declared {
+                        r.fields[i].ty = nt;
+                        r.fields[i].presence = Presence::Required;
+                    }
+                }
+                Ty::Record(r)
+            }
+            Ty::Map(vt) => match seg {
+                PathSeg::Field(_) | PathSeg::Each => {
+                    let nt = if rest.is_empty() {
+                        self.patch_leaf(&vt, op, declared, span, path)
+                    } else {
+                        self.patch_value_in(&vt, rest, op, span, declared, None)
+                    };
+                    if declared { tn } else { Ty::Map(Box::new(self.union(vec![*vt, nt]))) }
+                }
+                _ => fail(self, format!("`{seg}` applies to lists, but `{shown}` is an object")),
+            },
+            Ty::List(et) => {
+                let all_elems = (*et).clone();
+                let mut et = et;
+                if let PathSeg::Select(keys) = seg {
+                    // Selector keys must be fields of the elements.
+                    if let Ty::Record(er) = self.ctx.shape(&et) {
+                        for (k, _) in keys {
+                            if er.get(k).is_none() && !er.open {
+                                let hint = did_you_mean(k, er.fields.iter().map(|f| f.name.as_str()));
+                                return fail(self, format!("elements of `{shown}` have no field `{k}`{hint}"));
+                            }
+                        }
+                    }
+                    // `[kind: "Deployment"]` on a list of mixed kinds: only those elements.
+                    let selected = self.select_members(&et, keys);
+                    if selected == Ty::Never {
+                        return fail(self, format!("no element of `{shown}` can match `{seg}`"));
+                    }
+                    et = Box::new(selected);
+                }
+                match seg {
+                    PathSeg::Field(_) => {
+                        fail(self, format!("`{shown}` is a list; select elements with `[]`, `[i]` or `[key: value]`"))
+                    }
+                    PathSeg::Each if rest.is_empty() && matches!(op, ValueOp::Remove) => {
+                        fail(self, "`[]` cannot be removed; set the list to `[]` instead".into())
+                    }
+                    _ if rest.is_empty() && matches!(op, ValueOp::Remove) => tn,
+                    _ => {
+                        let nt = if rest.is_empty() {
+                            self.patch_leaf(&et, op, declared, span, path)
+                        } else {
+                            let child = format!("{shown}[]");
+                            self.patch_value_in(&et, rest, op, span, declared, Some(&child))
+                        };
+                        // Unselected elements keep their type.
+                        if declared { tn } else { Ty::List(Box::new(self.union(vec![all_elems, nt]))) }
+                    }
+                }
+            }
+            Ty::Tuple(ts) => match seg {
+                PathSeg::Index(n) if *n < ts.len() => {
+                    let nt = if rest.is_empty() {
+                        self.patch_leaf(&ts[*n], op, declared, span, path)
+                    } else {
+                        self.patch_value_in(&ts[*n], rest, op, span, declared, None)
+                    };
+                    let mut ts = ts;
+                    if !declared {
+                        ts[*n] = nt;
+                    }
+                    Ty::Tuple(ts)
+                }
+                _ => fail(self, format!("`{seg}` does not select an element of `{shown}`")),
+            },
+            _ => fail(self, format!("cannot patch inside `{shown}`")),
+        }
+    }
+
+    /// Whether a patch path can continue through `m` with `seg`.
+    fn has_seg(&self, m: &Ty, seg: &PathSeg) -> bool {
+        match (self.ctx.shape(m), seg) {
+            (Ty::Record(r), PathSeg::Field(k)) => r.open || r.get(k).is_some(),
+            (Ty::Map(_) | Ty::Json | Ty::Error, _) => true,
+            (Ty::List(_) | Ty::Tuple(_), PathSeg::Each | PathSeg::Index(_) | PathSeg::Select(_)) => true,
+            _ => false,
+        }
+    }
+
+    /// Element types that a selector with literal values can match.
+    fn select_members(&self, et: &Ty, keys: &[(String, Expr)]) -> Ty {
+        let ms = self.union_members(et);
+        let keep: Vec<Ty> = ms
+            .into_iter()
+            .filter(|m| match self.ctx.shape(m) {
+                Ty::Record(r) => keys.iter().all(|(k, v)| match (r.get(k), &v.kind) {
+                    (None, _) => r.open,
+                    (Some(f), ExprKind::Lit(l)) => self.ctx.narrow(&f.ty, &Ty::Lit(l.clone())) != Ty::Never,
+                    (Some(_), _) => true,
+                }),
+                _ => true,
+            })
+            .collect();
+        self.union(keep)
+    }
+
+    /// The type a list element / map value / tuple element gets from `op`.
+    fn patch_leaf(&mut self, old: &Ty, op: &ValueOp, declared: bool, span: Span, path: &[PathSeg]) -> Ty {
+        match op {
+            ValueOp::Set(v) if declared => {
+                self.check(v, old);
+                old.clone()
+            }
+            ValueOp::Set(v) => self.synth(v),
+            ValueOp::Merge(v) => self.merge_ty(old, v, declared, span),
+            ValueOp::Remove => {
+                self.error(span, format!("`{}`: only fields and selected list elements can be removed", fmt_path(path)));
+                Ty::Error
+            }
+        }
+    }
+
+    /// Type of a value created where nothing was before (`a.b.c: v` with `a` missing).
+    fn new_path_ty(&mut self, rest: &[PathSeg], op: &ValueOp) -> Ty {
+        let leaf = match op {
+            ValueOp::Set(v) | ValueOp::Merge(v) => self.synth(v),
+            ValueOp::Remove => Ty::null(),
+        };
+        rest.iter().rev().fold(leaf, |t, seg| match seg {
+            PathSeg::Field(k) => Ty::Record(Rec { fields: vec![Field { name: k.clone(), ty: t, presence: Presence::Required }], open: false }),
+            _ => Ty::Json,
+        })
+    }
+
+    /// `+:`: append to a list, or JSON-merge-patch an object.
+    fn merge_ty(&mut self, target: &Ty, v: &Expr, declared: bool, span: Span) -> Ty {
+        let ms: Vec<Ty> = self.union_members(target).into_iter().filter(|m| !self.is_null(m)).collect();
+        let non_null = self.union(ms);
+        match self.ctx.shape(&non_null) {
+            Ty::List(et) => {
+                if declared {
+                    self.check(v, &Ty::List(et));
+                    target.clone()
+                } else {
+                    let vt = self.synth(v);
+                    let new_elems = match self.ctx.shape(&vt) {
+                        Ty::List(e) => *e,
+                        Ty::Tuple(ts) => self.union(ts),
+                        _ => {
+                            self.error(span, format!("`+:` on a list appends a list, got `{vt}`"));
+                            Ty::Error
+                        }
+                    };
+                    Ty::List(Box::new(self.union(vec![*et, new_elems])))
+                }
+            }
+            Ty::Record(r) => {
+                if declared {
+                    // A merge patch: every given field must fit, but none is required.
+                    match &v.kind {
+                        ExprKind::Object(members) => {
+                            let shown = match self.norm(&non_null) {
+                                Ty::Alias(n) => n,
+                                t => t.to_string(),
+                            };
+                            let mut optional = r.clone();
+                            for f in &mut optional.fields {
+                                f.presence = Presence::Optional;
+                            }
+                            self.check_members(members, &optional, &shown);
+                        }
+                        _ => {
+                            let mut partial = r.clone();
+                            for f in &mut partial.fields {
+                                f.presence = Presence::Optional;
+                            }
+                            self.check(v, &Ty::Record(partial));
+                        }
+                    }
+                    target.clone()
+                } else {
+                    let vt = self.synth(v);
+                    match self.ctx.shape(&vt) {
+                        Ty::Record(vr) => Ty::Record(merge_records(r, vr)),
+                        _ => {
+                            self.error(span, format!("`+:` on an object merges an object, got `{vt}`"));
+                            Ty::Error
+                        }
+                    }
+                }
+            }
+            Ty::Map(vt) if declared => {
+                // A merge patch into a map: values must fit; `null` removes a key.
+                let patch = Ty::Map(Box::new(Ty::Union(vec![*vt, Ty::null()])));
+                self.check(v, &patch);
+                target.clone()
+            }
+            Ty::Map(_) | Ty::Json | Ty::Error => {
+                let vt = self.synth(v);
+                if declared {
+                    target.clone()
+                } else {
+                    self.union(vec![non_null, vt])
+                }
+            }
+            _ => {
+                self.error(span, format!("`+:` merges lists and objects, but this is `{target}`"));
+                self.synth(v);
+                Ty::Error
+            }
         }
     }
 
@@ -1909,5 +2408,14 @@ fn item_span(item: &Item) -> Span {
         | Item::Import { span, .. }
         | Item::Refine { span, .. } => *span,
         Item::Fn(f) => f.span,
+    }
+}
+
+/// `a.b.c` as a dotted name, if `e` is a chain of plain field accesses on a variable.
+pub fn qualified_name(e: &Expr) -> Option<String> {
+    match &e.kind {
+        ExprKind::Var(n) => Some(n.clone()),
+        ExprKind::Field(b, Label::Name(k), false) => qualified_name(b).map(|q| format!("{q}.{k}")),
+        _ => None,
     }
 }

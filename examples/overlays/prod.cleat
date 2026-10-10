@@ -1,0 +1,15 @@
+// Production: the shared base with production settings patched on top.
+//
+//   cleat export examples/overlays/prod.cleat --set image=ghcr.io/acme/api:1.4.2
+
+import base from "./base.cleat"
+
+input image: Str
+
+export api = base.app("api", image) with {
+  [kind: "Deployment"].spec.replicas: 3,
+  [kind: "Deployment"].metadata.labels +: { tier: "prod" },
+  [kind: "Deployment"].spec.template.spec.containers[name: "api"].resources.limits: { cpu: "1", memory: "512Mi" },
+  [kind: "Deployment"].spec.template.spec.containers[name: "api"].env +: [{ name: "LOG_LEVEL", value: "warn" }],
+  [kind: "Service"].spec.type: "LoadBalancer",
+}

@@ -1,8 +1,11 @@
 //! Evaluation (SPEC §7 step 4). Every value crossing an annotation is checked
 //! against its type by `conform`, which also fills in defaults.
 
+use std::cell::RefCell;
 use std::collections::HashMap;
 use std::fmt;
+use std::path::{Path, PathBuf};
+use std::rc::Rc;
 
 use crate::ast::*;
 use crate::diag::Span;
@@ -114,8 +117,14 @@ pub struct Component {
 }
 
 /// Evaluate a checked program and return its exports in source order.
-pub fn run(items: &[Item], ctx: TypeCtx, inputs: Vec<(String, InputValue)>) -> Result<Vec<Component>, Vec<EvalError>> {
+pub fn run(
+    items: &[Item],
+    ctx: TypeCtx,
+    base: Option<&Path>,
+    inputs: Vec<(String, InputValue)>,
+) -> Result<Vec<Component>, Vec<EvalError>> {
     let mut ev = Evaluator::new(ctx);
+    ev.base = base.map(Path::to_path_buf);
     let mut errs = Vec::new();
     let mut comps = Vec::new();
 
@@ -168,6 +177,7 @@ pub fn run(items: &[Item], ctx: TypeCtx, inputs: Vec<(String, InputValue)>) -> R
             Item::Fn(f) => {
                 ev.fns.insert(f.name.clone(), f.clone());
             }
+            Item::Import { name, path, span } => ev.import(name, path, *span).map_err(|e| vec![e])?,
             Item::Export { name, after, value, .. } => {
                 let docs = match ev.eval(value).map_err(|e| vec![e])? {
                     Value::List(vs) => vs,
@@ -176,7 +186,7 @@ pub fn run(items: &[Item], ctx: TypeCtx, inputs: Vec<(String, InputValue)>) -> R
                 let after = after.iter().map(|(a, _)| a.clone()).collect();
                 comps.push(Component { name: name.clone(), after, docs });
             }
-            Item::Type { .. } | Item::Import { .. } | Item::Refine { .. } => {}
+            Item::Type { .. } | Item::Refine { .. } => {}
         }
     }
     if errs.is_empty() { Ok(comps) } else { Err(errs) }
@@ -235,11 +245,68 @@ struct Evaluator {
     globals: Vec<(String, Value)>,
     locals: Vec<(String, Value)>,
     trace: Vec<(String, Span)>,
+    /// Imported `.cleat` modules, each with its own constants, functions and types.
+    imports: HashMap<String, Rc<RefCell<Evaluator>>>,
+    /// Directory imports resolve against.
+    base: Option<PathBuf>,
 }
 
 impl Evaluator {
     fn new(ctx: TypeCtx) -> Self {
-        Evaluator { ctx, fns: HashMap::new(), globals: Vec::new(), locals: Vec::new(), trace: Vec::new() }
+        Evaluator {
+            ctx,
+            fns: HashMap::new(),
+            globals: Vec::new(),
+            locals: Vec::new(),
+            trace: Vec::new(),
+            imports: HashMap::new(),
+            base: None,
+        }
+    }
+
+    /// Load an imported `.cleat` module: evaluate its constants and register its functions.
+    fn import(&mut self, ns: &str, path: &str, span: Span) -> Result<(), EvalError> {
+        let full = match &self.base {
+            Some(b) => b.join(path),
+            None => PathBuf::from(path),
+        };
+        let module = crate::modules::load(&full).map_err(|m| self.error(span, m))?;
+        if !module.is_source {
+            return Ok(()); // schemas only contribute types
+        }
+        let checked = crate::check::checked_module(&full).map_err(|m| self.error(span, m))?;
+        let mut sub = Evaluator::new(checked.outcome.ctx.clone());
+        sub.base = full.canonicalize().ok().and_then(|p| p.parent().map(Path::to_path_buf));
+        let in_module = |e: EvalError| EvalError { msg: format!("in module `{ns}` ({}): {}", path, e.msg), ..e };
+        for item in &module.items {
+            match item {
+                Item::Import { name, path, span } => sub.import(name, path, *span).map_err(in_module)?,
+                Item::Let { name, ty, value, span } => {
+                    let v = sub.eval(value).map_err(in_module)?;
+                    let v = match ty {
+                        Some(te) => {
+                            let t = sub.ctx.resolve(te);
+                            sub.conform_top(v, &t).map_err(|m| in_module(sub.error(*span, format!("`{name}`: {m}"))))?
+                        }
+                        None => v,
+                    };
+                    sub.globals.push((name.clone(), v));
+                }
+                Item::Fn(f) => {
+                    sub.fns.insert(f.name.clone(), f.clone());
+                }
+                _ => {}
+            }
+        }
+        self.imports.insert(ns.to_string(), Rc::new(RefCell::new(sub)));
+        Ok(())
+    }
+
+    /// `ns.x` (possibly `ns.sub.x`): a constant from an imported module.
+    fn lookup_qualified(&self, q: &str) -> Option<Value> {
+        let (ns, rest) = q.split_once('.')?;
+        let m = self.imports.get(ns)?.borrow();
+        m.lookup(rest).cloned().or_else(|| m.lookup_qualified(rest))
     }
 
     fn error(&self, span: Span, msg: impl Into<String>) -> EvalError {
@@ -521,6 +588,14 @@ impl Evaluator {
                 Ok(Value::Obj(entries.into_iter().map(|(k, v, _)| (k, v)).collect()))
             }
             ExprKind::Field(b, label, optional) => {
+                if let Some(q) = crate::check::qualified_name(e) {
+                    let root = q.split('.').next().unwrap_or("");
+                    if self.lookup(root).is_none() {
+                        if let Some(v) = self.lookup_qualified(&q) {
+                            return Ok(v);
+                        }
+                    }
+                }
                 let v = self.eval(b)?;
                 match (&v, label) {
                     (Value::Null, _) if *optional => Ok(Value::Null),
@@ -578,6 +653,34 @@ impl Evaluator {
                 let r = self.eval(body);
                 self.locals.pop();
                 r
+            }
+            ExprKind::With(b, patches) => {
+                let mut v = self.eval(b)?;
+                for p in patches {
+                    let mut path = Vec::with_capacity(p.path.len());
+                    for seg in &p.path {
+                        path.push(match seg {
+                            PathSeg::Field(k) => Seg::Field(k.clone()),
+                            PathSeg::Each => Seg::Each,
+                            PathSeg::Index(i) => Seg::Index(*i),
+                            PathSeg::Select(keys) => {
+                                let mut ks = Vec::new();
+                                for (k, e) in keys {
+                                    ks.push((k.clone(), self.eval(e)?));
+                                }
+                                Seg::Select(ks)
+                            }
+                        });
+                    }
+                    let op = match &p.op {
+                        ValueOp::Set(e) => Op::Set(self.eval(e)?),
+                        ValueOp::Merge(e) => Op::Merge(self.eval(e)?),
+                        ValueOp::Remove => Op::Remove,
+                    };
+                    v = apply_patch(v, &path, &op, &mut Vec::new())
+                        .map_err(|m| self.error(p.span, format!("`{}`: {m}", fmt_patch_path(&p.path))))?;
+                }
+                Ok(v)
             }
             ExprKind::Match(s, arms) => {
                 let v = self.eval(s)?;
@@ -808,25 +911,42 @@ impl Evaluator {
     // ---------- calls ----------
 
     fn call(&mut self, name: &str, args: &[Arg], span: Span) -> Result<Value, EvalError> {
-        if let Some(f) = self.fns.get(name).cloned() {
-            return self.call_user(&f, args, span);
-        }
+        // Arguments are evaluated in the caller's scope.
         let mut vals = Vec::with_capacity(args.len());
         for a in args {
-            vals.push(self.eval(&a.value)?);
+            vals.push((a.name.clone(), self.eval(&a.value)?, a.value.span));
         }
-        builtin(name, vals).map_err(|m| self.error(span, format!("{name}: {m}")))
+        self.call_values(name, vals, span)
     }
 
-    fn call_user(&mut self, f: &FnDecl, args: &[Arg], span: Span) -> Result<Value, EvalError> {
+    fn call_values(&mut self, name: &str, vals: Vec<(Option<String>, Value, Span)>, span: Span) -> Result<Value, EvalError> {
+        if let Some(f) = self.fns.get(name).cloned() {
+            return self.call_user(&f, vals, span);
+        }
+        if let Some((ns, rest)) = name.split_once('.') {
+            if let Some(m) = self.imports.get(ns).cloned() {
+                let r = m.borrow_mut().call_values(rest, vals, span);
+                return r.map_err(|mut e| {
+                    let mut trace = self.trace.clone();
+                    trace.push((name.to_string(), span));
+                    trace.extend(e.trace);
+                    e.trace = trace;
+                    e
+                });
+            }
+        }
+        builtin(name, vals.into_iter().map(|(_, v, _)| v).collect())
+            .map_err(|m| self.error(span, format!("{name}: {m}")))
+    }
+
+    fn call_user(&mut self, f: &FnDecl, args: Vec<(Option<String>, Value, Span)>, span: Span) -> Result<Value, EvalError> {
         if self.trace.len() > 256 {
             return Err(self.error(span, "call depth limit exceeded"));
         }
-        // Evaluate arguments in the caller's scope.
         let mut slots: Vec<Option<(Value, Span)>> = vec![None; f.params.len()];
         let mut next = 0;
-        for a in args {
-            let i = match &a.name {
+        for (name, value, at) in args {
+            let i = match &name {
                 Some(n) => f.params.iter().position(|p| p.name == *n),
                 None => {
                     while next < slots.len() && slots[next].is_some() {
@@ -836,9 +956,9 @@ impl Evaluator {
                 }
             };
             let Some(i) = i.filter(|i| *i < slots.len()) else {
-                return Err(self.error(a.value.span, format!("bad argument to `{}`", f.name)));
+                return Err(self.error(at, format!("bad argument to `{}`", f.name)));
             };
-            slots[i] = Some((self.eval(&a.value)?, a.value.span));
+            slots[i] = Some((value, at));
         }
         // Bind parameters in the callee's scope; defaults and refinements may use earlier parameters.
         let saved = std::mem::take(&mut self.locals);
@@ -1018,4 +1138,154 @@ fn regex_cached(re: &str) -> Result<regex::Regex, String> {
         c.borrow_mut().insert(re.to_string(), r.clone());
         Ok(r)
     })
+}
+
+// ---------- value patches (`e with { ... }`) ----------
+
+enum Seg {
+    Field(String),
+    Each,
+    Index(usize),
+    Select(Vec<(String, Value)>),
+}
+
+enum Op {
+    Set(Value),
+    Merge(Value),
+    Remove,
+}
+
+fn fmt_patch_path(path: &[PathSeg]) -> String {
+    crate::ast::fmt_path(path)
+}
+
+fn apply_patch(v: Value, path: &[Seg], op: &Op, trail: &mut Vec<String>) -> Result<Value, String> {
+    let Some((seg, rest)) = path.split_first() else {
+        return match op {
+            Op::Set(x) => Ok(x.clone()),
+            Op::Merge(x) => merge(v, x.clone(), trail),
+            Op::Remove => Ok(v),
+        };
+    };
+    match seg {
+        Seg::Field(k) => {
+            let mut es = match v {
+                Value::Obj(es) => es,
+                Value::Null => Vec::new(), // create missing objects on the way
+                other => return Err(at(trail, format!("cannot patch `.{k}` of {}", other.kind()))),
+            };
+            let pos = es.iter().position(|(ek, _)| ek == k);
+            if rest.is_empty() && matches!(op, Op::Remove) {
+                if let Some(i) = pos {
+                    es.remove(i);
+                }
+                return Ok(Value::Obj(es));
+            }
+            trail.push(path_key(k));
+            let child = pos.map_or(Value::Null, |i| std::mem::replace(&mut es[i].1, Value::Null));
+            let new = apply_patch(child, rest, op, trail)?;
+            trail.pop();
+            match pos {
+                Some(i) => es[i].1 = new,
+                None => es.push((k.clone(), new)),
+            }
+            Ok(Value::Obj(es))
+        }
+        Seg::Each => match v {
+            Value::List(xs) => {
+                let mut out = Vec::with_capacity(xs.len());
+                for (i, x) in xs.into_iter().enumerate() {
+                    trail.push(format!("[{i}]"));
+                    out.push(apply_patch(x, rest, op, trail)?);
+                    trail.pop();
+                }
+                Ok(Value::List(out))
+            }
+            Value::Obj(es) => {
+                let mut out = Vec::with_capacity(es.len());
+                for (k, x) in es {
+                    trail.push(path_key(&k));
+                    out.push((k, apply_patch(x, rest, op, trail)?));
+                    trail.pop();
+                }
+                Ok(Value::Obj(out))
+            }
+            Value::Null => Ok(Value::Null),
+            other => Err(at(trail, format!("`[]` needs a list or object, got {}", other.kind()))),
+        },
+        Seg::Index(n) => {
+            let Value::List(mut xs) = v else { return Err(at(trail, format!("`[{n}]` needs a list, got {}", v.kind()))) };
+            if *n >= xs.len() {
+                return Err(at(trail, format!("index {n} is out of bounds (length {})", xs.len())));
+            }
+            if rest.is_empty() && matches!(op, Op::Remove) {
+                xs.remove(*n);
+                return Ok(Value::List(xs));
+            }
+            trail.push(format!("[{n}]"));
+            let x = std::mem::replace(&mut xs[*n], Value::Null);
+            xs[*n] = apply_patch(x, rest, op, trail)?;
+            trail.pop();
+            Ok(Value::List(xs))
+        }
+        Seg::Select(keys) => {
+            let sel = keys.iter().map(|(k, v)| format!("{}: {}", fmt_key(k), v.short())).collect::<Vec<_>>().join(", ");
+            let Value::List(xs) = v else { return Err(at(trail, format!("`[{sel}]` needs a list, got {}", v.kind()))) };
+            let matches = |x: &Value| keys.iter().all(|(k, want)| x.get(k).is_some_and(|got| got.loose_eq(want)));
+            if !xs.iter().any(matches) {
+                return Err(format!("no element of `{}` matches `[{sel}]`", if trail.is_empty() { "the list".into() } else { fmt_path(trail).trim_start_matches('.').to_string() }));
+            }
+            if rest.is_empty() && matches!(op, Op::Remove) {
+                return Ok(Value::List(xs.into_iter().filter(|x| !matches(x)).collect()));
+            }
+            let mut out = Vec::with_capacity(xs.len());
+            for (i, x) in xs.into_iter().enumerate() {
+                if matches(&x) {
+                    trail.push(format!("[{i}]"));
+                    out.push(apply_patch(x, rest, op, trail)?);
+                    trail.pop();
+                } else {
+                    out.push(x);
+                }
+            }
+            Ok(Value::List(out))
+        }
+    }
+}
+
+/// `+:`: lists append; objects follow JSON Merge Patch (RFC 7386): nested
+/// objects merge, `null` removes a key, anything else replaces.
+fn merge(a: Value, b: Value, trail: &mut Vec<String>) -> Result<Value, String> {
+    match (a, b) {
+        (Value::List(mut xs), Value::List(ys)) => {
+            xs.extend(ys);
+            Ok(Value::List(xs))
+        }
+        (Value::Obj(xs), Value::Obj(ys)) => Ok(merge_patch(Value::Obj(xs), Value::Obj(ys))),
+        (Value::Null, b @ (Value::List(_) | Value::Obj(_))) => Ok(merge_patch(Value::Null, b)),
+        (a, b) => Err(at(trail, format!("`+:` cannot merge {} into {}", b.kind(), a.kind()))),
+    }
+}
+
+fn merge_patch(target: Value, patch: Value) -> Value {
+    let Value::Obj(ps) = patch else { return patch };
+    let mut es = match target {
+        Value::Obj(es) => es,
+        _ => Vec::new(),
+    };
+    for (k, pv) in ps {
+        let pos = es.iter().position(|(ek, _)| *ek == k);
+        match (pv, pos) {
+            (Value::Null, Some(i)) => {
+                es.remove(i);
+            }
+            (Value::Null, None) => {}
+            (pv, Some(i)) => {
+                let old = std::mem::replace(&mut es[i].1, Value::Null);
+                es[i].1 = merge_patch(old, pv);
+            }
+            (pv, None) => es.push((k, merge_patch(Value::Null, pv))),
+        }
+    }
+    Value::Obj(es)
 }
