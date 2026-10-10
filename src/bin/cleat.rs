@@ -10,6 +10,8 @@ usage:
   cleat export <file.cleat> [options]
   cleat gen <schema>         print Cleat types for an OpenAPI document or CRD file
   cleat lsp                  language server on stdio (used by editors)
+  cleat argocd generate      Argo CD plugin: export $ARGOCD_ENV_CLEAT_FILE (default main.cleat)
+  cleat argocd params        Argo CD plugin: announce the file's inputs as parameters
 
 export options:
   --input <file>           input values: a JSON or YAML object
@@ -39,6 +41,9 @@ fn main() -> ExitCode {
         eprintln!("{USAGE}");
         return ExitCode::from(2);
     };
+    if cmd == "argocd" {
+        return argocd(args.get(1).map(String::as_str));
+    }
     if cmd == "gen" {
         let Some(path) = args.get(1) else {
             eprintln!("{USAGE}");
@@ -273,4 +278,98 @@ fn export(opts: Opts, src: &str) -> ExitCode {
 
 fn base_dir(file: &str) -> Option<std::path::PathBuf> {
     std::path::Path::new(file).parent().map(|p| if p.as_os_str().is_empty() { ".".into() } else { p.to_path_buf() })
+}
+
+// ---------- Argo CD config management plugin ----------
+//
+// Argo runs these in the application's source directory. Settings come from the
+// Application's `plugin.env` (prefixed with ARGOCD_ENV_ by Argo):
+//   CLEAT_FILE    entry file (default: main.cleat)
+//   CLEAT_TARGET  output target (default: argocd, i.e. with sync waves)
+
+fn argocd(sub: Option<&str>) -> ExitCode {
+    let file = std::env::var("ARGOCD_ENV_CLEAT_FILE").unwrap_or_else(|_| "main.cleat".into());
+    let src = match std::fs::read_to_string(&file) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("cleat: cannot read {file}: {e} (set CLEAT_FILE in the Application's plugin env)");
+            return ExitCode::FAILURE;
+        }
+    };
+    match sub {
+        Some("generate") => {
+            let inputs = match argocd_params() {
+                Ok(i) => i,
+                Err(e) => {
+                    eprintln!("cleat: {e}");
+                    return ExitCode::FAILURE;
+                }
+            };
+            let target = std::env::var("ARGOCD_ENV_CLEAT_TARGET").unwrap_or_else(|_| "argocd".into());
+            let opts = Opts {
+                file,
+                vcs: false,
+                inputs,
+                target,
+                json: false,
+                out: None,
+                flux: FluxOptions {
+                    source: String::new(),
+                    path: ".".into(),
+                    namespace: "flux-system".into(),
+                    prefix: String::new(),
+                    interval: "10m".into(),
+                },
+            };
+            export(opts, &src)
+        }
+        Some("params") => {
+            let infos = match cleat::inputs(&src, base_dir(&file).as_deref()) {
+                Ok(i) => i,
+                Err(out) => {
+                    print_diags(&file, &out);
+                    return ExitCode::FAILURE;
+                }
+            };
+            let s = |x: &str| Value::Str(x.to_string());
+            let as_str = |v: &Value| match v {
+                Value::Str(x) => x.clone(),
+                other => other.to_string(),
+            };
+            let params: Vec<Value> = infos
+                .iter()
+                .map(|i| {
+                    let mut tooltip = format!("Type: {}", i.ty);
+                    if let Some(d) = &i.definition {
+                        tooltip.push_str(&format!(" = {d}"));
+                    }
+                    let mut p = vec![
+                        ("name".to_string(), s(&i.name)),
+                        ("title".to_string(), s(&i.name)),
+                        ("tooltip".to_string(), s(&tooltip)),
+                        ("required".to_string(), Value::Bool(i.required)),
+                        ("itemType".to_string(), s("string")),
+                        ("collectionType".to_string(), s(i.collection)),
+                    ];
+                    match (&i.default, i.collection) {
+                        (Some(Value::List(xs)), "array") => {
+                            p.push(("array".into(), Value::List(xs.iter().map(|x| s(&as_str(x))).collect())));
+                        }
+                        (Some(Value::Obj(es)), "map") => {
+                            p.push(("map".into(), Value::Obj(es.iter().map(|(k, v)| (k.clone(), s(&as_str(v)))).collect())));
+                        }
+                        (Some(v), "string") => p.push(("string".into(), s(&as_str(v)))),
+                        _ => {}
+                    }
+                    Value::Obj(p)
+                })
+                .collect();
+            println!("{}", emit::to_json(&Value::List(params), false));
+            ExitCode::SUCCESS
+        }
+        _ => {
+            eprintln!("usage: cleat argocd generate | cleat argocd params");
+            ExitCode::from(2)
+        }
+    }
 }

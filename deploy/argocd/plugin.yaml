@@ -1,0 +1,21 @@
+# Argo CD config management plugin for Cleat (built into the sidecar image).
+# Applications reference it as `plugin: { name: cleat-v1 }`, or leave the name
+# empty to match any app whose source directory has a main.cleat.
+#
+# Application plugin env (Argo prefixes these with ARGOCD_ENV_):
+#   CLEAT_FILE    entry file in the source directory (default: main.cleat)
+#   CLEAT_TARGET  plain | argocd (default: argocd, which adds sync-wave annotations)
+apiVersion: argoproj.io/v1alpha1
+kind: ConfigManagementPlugin
+metadata:
+  name: cleat
+spec:
+  version: v1
+  discover:
+    fileName: main.cleat
+  generate:
+    command: [cleat, argocd, generate]
+  parameters:
+    # Inputs declared in the entry file, with types in the tooltips.
+    dynamic:
+      command: [cleat, argocd, params]

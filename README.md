@@ -57,6 +57,41 @@ export api = base.app("api", image) with {
 Patches are checked against the Kubernetes types: a misspelled field, a
 value of the wrong type, or a selector that can't match is an error.
 
+## Argo CD
+
+Cleat runs as an Argo CD [config management plugin](https://argo-cd.readthedocs.io/en/stable/operator-manual/config-management-plugins/) sidecar:
+
+```sh
+docker build -f deploy/argocd/Dockerfile -t <registry>/cleat-cmp:<tag> .   # then push it
+# set the image in deploy/argocd/repo-server-patch.yaml, then:
+kubectl -n argocd patch deployment argocd-repo-server --patch-file deploy/argocd/repo-server-patch.yaml
+```
+
+```yaml
+# Application
+spec:
+  source:
+    repoURL: https://github.com/acme/deploy.git
+    path: apps/shop
+    plugin:
+      name: cleat-v1
+      env:                                  # optional
+        - { name: CLEAT_FILE, value: prod.cleat }   # default: main.cleat
+      parameters:
+        - { name: image, string: ghcr.io/acme/api:1.4.2 }
+```
+
+- Each `input` is announced to the Argo CD UI as a parameter: required if it
+  has no default, with its type (e.g. `Env = "dev" | "prod"`) as the tooltip.
+- Parameters are decoded by type and validated before evaluation; invalid
+  ones show up in the Application's conditions with Cleat's message.
+- Output uses the `argocd` target, so `export x after y` becomes sync waves
+  (`CLEAT_TARGET=plain` turns this off).
+
+`deploy/argocd/e2e/run.sh` runs all of this against a throwaway kind cluster
+(Argo CD stable, an in-cluster git server, three dependent components) and
+checks parameters, patches, sync waves and their order, and error reporting.
+
 ## Editor support
 
 `cleat lsp` is a Language Server (stdio) with diagnostics as you type and
