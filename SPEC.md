@@ -1,232 +1,287 @@
-# Language Specification (draft)
+# Language Specification (draft v0.2)
 
-Status: draft. Decisions marked **(provisional)** are defaults chosen to unblock
-work and are expected to be revisited.
+A typed configuration language whose values are exactly JSON. It is aimed
+at Kubernetes as a replacement for Helm and Kustomize, with TypeScript-style
+structural types and error messages that point at the exact field and
+constraint that failed.
 
-## 1. Design principles
+Decisions marked **(provisional)** unblock work and are expected to be
+revisited.
 
-- **Structural by default, nominal on request.** Tuples, records, unions, and
-  refinements compare by shape. `nominal` types and `enum`s compare by name.
-- **Subtyping is the glue.** Unions, `Never`, refinements, and enum variants are
-  all expressed through one subtyping relation.
-- **Refinements are decidable.** Predicates stay within a fragment an SMT solver
-  decides quickly (QF-UFLIA plus measures).
-- **Refinements are erased; tags are not.** Anything a program can discriminate
-  at runtime carries a runtime tag.
+## 1. Principles
 
-## 2. Types
+- **Values are JSON.** Every value is `null`, a boolean, a number, a string, a
+  list, or an object. Nothing else can reach the output.
+- **Types are structural.** There are no nominal types and no identity. Two
+  types with the same shape are the same type.
+- **Exact by default.** An object type lists every field it allows, so
+  `replcias: 3` is an error. `..` opts into extra fields.
+- **Check early, fail precisely.** `tl check` proves what it can without
+  inputs. `tl export` decodes inputs against their declared types and checks
+  every annotated value during evaluation. An error names the source location,
+  the value's path (`spec.template.spec.containers[0].ports[0]`), and the
+  constraint that failed.
+- **Low ceremony.** Dotted keys, defaults, fields filled in from single-value
+  types, conditional fields and comprehensions keep files close to the YAML
+  they produce.
+- **Evaluation terminates (provisional).** No general recursion: a function
+  can only call functions declared above it.
+
+## 2. Values
 
 ```
-τ ::= Never                         -- bottom, empty union
-    | Int | Float | Bool | Str      -- primitives (nominal)
-    | N[τ, ...]                     -- nominal type or enum, by name
-    | N.V                           -- enum variant type
-    | (τ₁, ..., τₙ)                 -- tuple
-    | { l₁: τ₁, ..., lₙ: τₙ }       -- exact record
-    | { l₁: τ₁, ..., lₙ: τₙ, .. }   -- open record ("at least these fields")
-    | τ₁ | τ₂                       -- untagged union
-    | τ where φ                     -- refinement (binder is `self`)
-    | (τ₁, ..., τₙ) -> τ            -- function
-    | α                             -- type variable
+null | true | false | <int> | <float> | "<string>" | [v, ...] | { key: v, ... }
 ```
 
-### 2.1 Tuples
+- Ints are 64-bit and floats are IEEE doubles. Both serialize as JSON numbers.
+- Objects keep the order of their keys. When a value is checked against a
+  record type, declared fields come first, in declaration order.
+- Tuples are lists of fixed length.
 
-`(A, B)` is sugar for the exact record `{0: A, 1: B}`. All product rules are
-stated once, for records. `()` is the empty record, the unit type.
+## 3. Types
 
-### 2.2 Records
-
-- Records are **exact** by default: `{a: Int}` has exactly the field `a`.
-- `{a: Int, ..}` is **open**: it has at least `a`.
-- Fields are immutable by default. A `mut` field is **invariant** (see §3).
-- Anonymous record types may appear anywhere a type may, including signatures.
-
-### 2.3 Never
-
-`Never` has no values. It is the identity of `|`, a subtype of every type, and
-the return type of diverging functions. `match` on a `Never` with zero arms is
-well typed.
-
-### 2.4 Nominal types
-
-```rust
-nominal UserId = Int
-nominal Port   = Int where 0 <= self && self < 65536
+```
+T ::= Never | null | Bool | Int | Float | Str | Json
+    | "lit" | 42 | 1.5 | true | false     -- literal (singleton) types
+    | [T]                                 -- list
+    | (T1, T2, ...)                       -- tuple (a fixed-length list)
+    | { [Str]: T }                        -- map: any keys, values of type T
+    | { f: T, g?: T, h: T = e, "a/b": T, .. }   -- record
+    | T1 | T2                             -- union
+    | T where φ                           -- refinement (binder: `self`)
+    | Name                                -- type alias
 ```
 
-- A nominal type is distinct from its underlying type and from every other
-  nominal type, even when the shapes are the same.
-- Construction is explicit: `Port(x)`. If the underlying type is refined, the
-  construction site must prove the refinement (§5). After that, consumers of
-  `Port` get the refinement for free (it is an invariant).
-- Unwrapping is explicit: `p.0` or `p as Int`.
-- There is no implicit inheritance between nominal types.
+- `Json` is the type of every value:
+  `null | Bool | Float | Str | [Json] | { [Str]: Json }`.
+- `Int <: Float`, and a literal is a subtype of its base type (`"dev" <: Str`).
+- In a record:
+  - `f: T` is required.
+  - `g?: T` is optional. Reading it gives `T | null`, and a `null` or missing
+    value is left out of the output.
+  - `h: T = e` has a default. Callers may omit it; when a value is checked
+    against the record, the default is filled in. Reading it gives `T`.
+  - A field whose type is a single literal (`kind: "Deployment"`) has that
+    literal as an implicit default.
+  - `..` makes the record **open**: any other key is allowed, with a `Json`
+    value.
+  - Keys may be quoted: `"app.kubernetes.io/name": Str`.
+- Type aliases may not be recursive. Use `Json` for recursive data.
+  **(provisional)**
 
-### 2.5 Aliases
-
-`type T = ...` is a purely structural alias. `T` and its definition are the
-same type.
-
-### 2.6 Disjoint unions (enums)
-
-```rust
-enum Shape {
-  Circle { r: Float where r > 0 },
-  Rect   (Float, Float),
-  Empty,
-}
-```
-
-- `enum` declares a nominal, closed, tagged sum.
-- Every variant `Shape.V` is a type in its own right, and `Shape.V <: Shape`.
-- `Shape` ≡ `Shape.Circle | Shape.Rect | Shape.Empty`. This lets untagged
-  unions select subsets of variants:
-  `fn f(s: Shape.Circle | Shape.Rect) -> Float`.
-
-### 2.7 Untagged unions
-
-`A | B` is a set-like structural union. Unions are normalized (§4).
-
-A union is **discriminable** at runtime if each member can be told apart by tag
-or by an executable predicate. Pattern matching that splits a union is only
-allowed on discriminable unions:
-
-- Primitives, nominal types, and enum variants carry runtime tags.
-- Exact records are discriminated by field set and then by field types.
-- Refined members are discriminated by evaluating their predicate, so
-  refinement predicates must be executable (§5.1).
-- A bare type variable `α` is never discriminable. Use an `enum` instead.
-
-### 2.8 Refinements
-
-```rust
-type Nat         = Int where self >= 0
-type NonEmpty[T] = List[T] where len(self) > 0
-type Range       = { lo: Int, hi: Int } where self.lo <= self.hi
-fn div(a: Int, b: Int where b != 0) -> Int
-```
-
-In parameter position, `b: Int where b != 0` may name the parameter instead of
-`self`, and later parameters' predicates may mention earlier ones.
-
-### 2.9 Generics **(provisional)**
-
-- Type parameters: `List[T]`, `fn id[T](x: T) -> T`.
-- Variance is **declared** on nominal types and enums (`enum List[+T]`,
-  `nominal Sink[-T]`). Undeclared means invariant. Aliases are expanded, so they
-  need no variance.
-- No higher-kinded types in v1.
-
-## 3. Subtyping
-
-`τ <: σ` is the least relation closed under:
+### 3.1 Subtyping
 
 | Rule | Statement |
 |---|---|
-| Refl | `τ <: τ` |
-| Bot | `Never <: τ` |
-| Union-L | `τ₁ \| τ₂ <: σ` iff `τ₁ <: σ` and `τ₂ <: σ` |
-| Union-R | `τ <: σ₁ \| σ₂` if `τ <: σ₁` or `τ <: σ₂` (after normalization) |
-| Nominal | `N[τ̄] <: N[σ̄]` per the declared variance of each parameter |
-| Variant | `N.V <: N` |
-| Record-exact | `{l̄: τ̄} <: {l̄: σ̄}` iff the label sets are the same and `τᵢ <: σᵢ` for each field |
-| Record-open | `{l̄: τ̄, m̄: ρ̄}` (exact or open) `<: {l̄: σ̄, ..}` iff `τᵢ <: σᵢ` |
-| Mut field | a `mut` field requires `τᵢ <: σᵢ` and `σᵢ <: τᵢ` |
-| Func | `(ā) -> r <: (b̄) -> s` iff `bᵢ <: aᵢ` and `r <: s` |
-| Refine | `τ where φ <: σ where ψ` iff `τ <: σ` and `φ ⇒ ψ` is valid (SMT) |
-| Refine-weaken | `τ where φ <: τ` |
+| Bottom/top | `Never <: T <: Json` for every `T` |
+| Numbers | `Int <: Float`; a literal is a subtype of its base type |
+| Unions | `A \| B <: C` iff both are; `A <: B \| C` if either holds |
+| Lists | covariant |
+| Maps | covariant; a record is a map if every field fits the value type (and, if open, the value type is `Json`) |
+| Records | for each field `f` of the target: a required field must be present and required in the source; an optional or defaulted field may be absent. The source may have extra fields only if the target is open. Fields are covariant. |
+| Refinement | `T where φ <: S where ψ` needs `T <: S` and `φ ⇒ ψ` (§6) |
 
-An exact record is never a subtype of an open record with *different* field
-types, and an open record is never a subtype of an exact one.
+### 3.2 Normalization
 
-## 4. Normalization
+Unions are flattened, `Never` members are dropped, and any member that is a
+subtype of another member is removed (`"dev" | Str` becomes `Str`). Records
+with a required `Never` field, and `T where false`, become `Never`.
+`true | false` is `Bool`.
 
-Applied to types before subtyping and exhaustiveness checks:
+## 4. Programs
 
-1. Flatten nested unions; deduplicate members.
-2. Remove `Never` from unions.
-3. Remove any member that is a subtype of another member
-   (`Nat | Int` → `Int`).
-4. Collapse uninhabited types to `Never`:
-   a record or tuple with a `Never` field; `τ where false`; any refinement whose
-   predicate the solver proves unsatisfiable.
-5. Expand aliases.
+A file is a sequence of top-level items. Everything except type aliases must
+be declared before it is used.
 
-## 5. Refinement logic
+```ts
+type Env = "dev" | "staging" | "prod"
 
-### 5.1 Predicate language
+input env: Env                          // supplied at export time
+input replicas: Int where self >= 1 = 2 // with a default
 
-Predicates `φ` are limited to:
+let name = "api"                        // top-level constant
 
-- integer and real **linear** arithmetic, comparisons, `&&`, `||`, `!`, `==`
-- booleans
-- field and tuple projection on `self` and in-scope parameters
-- **measures**: pure, total, structurally recursive functions marked `@measure`
-  (for example `len`, `size`), encoded as uninterpreted functions with
-  axioms on constructors
+fn port_name(p: Int) -> Str = "http-\(p)"   // functions; the body is one expression
 
-No user-written quantifiers. Every predicate must also be **executable**,
-because predicates drive union discrimination (§2.7) and gradual checks (§5.3).
+export { kind: "ConfigMap", ... }       // each `export` emits documents
+```
 
-### 5.2 Verification conditions
+- `input name: T (= default)?` declares a value supplied from outside (§8).
+- `let name (: T)? = e` binds a constant.
+- `fn name(params) (-> T)? = e` declares a function. A parameter may have a
+  default (`port: Int = 8080`). Calls may use positional or named arguments
+  (`f(1, port: 80)`).
+- `export e` emits `e` as output. If `e` is a list, each element is a separate
+  document. `export name (after a, b)? = e` exports a named **component** (§9).
+- Shadowing is allowed. Facts the checker knows about the outer variable are
+  dropped while the inner one is in scope.
 
-The checker emits a VC at every:
+## 5. Expressions
 
-- subsumption point (argument passing, return, annotated `let`)
-- construction of a nominal type whose underlying type is refined
-- enum variant construction with refined fields
+```ts
+null  true  42  1.5  "text \(expr) more"  [a, b]  (a, b)  { k: v }
+x   x.f   x.0   xs[i]   m["key"]   f(a, b, name: c)   T { ... }
+-x  !x  a + b  a - b  a * b  a / b  a % b  a == b  a != b  a < b  ...
+a && b   a || b   a ?? b   if c then a else b   let x = e; body
+match e { pattern => e, ... }
+```
 
-Path conditions from `if`, `match`, and earlier `let` bindings are added as
-hypotheses. VCs are discharged by Z3 or CVC5.
+- **Interpolation** is `\(expr)`, so shell `${VAR}` in container commands is
+  left alone. Interpolated values must be `Str`, `Int`, `Float` or `Bool`.
+- **`a ?? b`** gives `b` when `a` is `null`.
+- **`T { ... }`** checks the object against `T` and fills in its defaults. It
+  is not a constructor: the result is an ordinary value.
+- **`xs[i]`** on a list has type `T` and fails at runtime when `i` is out of
+  bounds. **`m["k"]`** on a map has type `T | null`.
 
-### 5.3 Unproven VCs **(provisional)**
+### 5.1 Object literals
 
-- Default: an unproven VC is a **compile error**, with the failing VC and a
-  counterexample model if one is available.
-- `--gradual`: an unproven VC becomes an inserted runtime check that panics
-  when it fails, and the compiler emits a warning.
-
-## 6. Narrowing and exhaustiveness
-
-- `match` arms and `if` conditions narrow the scrutinee type. A type-test arm
-  `x: T => ...` removes `T` from the remaining union. A boolean condition adds
-  a hypothesis for the refinement checker.
-- A `match` is exhaustive when the remaining scrutinee type normalizes to
-  `Never`.
-- Intersections are used **internally** by the checker to represent narrowed
-  types, but there is no surface `&` syntax in v1. **(provisional)**
-
-```rust
-fn safe_div(a: Int, b: Int) -> Int | Str {
-  if b == 0 { "div by zero" } else { div(a, b) }  // b: Int where b != 0
-}
-
-fn area(s: Shape.Circle | Shape.Rect) -> Float {
-  match s {
-    Shape.Circle { r } => 3.14159 * r * r,
-    Shape.Rect (w, h)  => w * h,
-  }                                               // exhaustive: Empty excluded
+```ts
+{
+  name: "web",                         // field
+  "app.kubernetes.io/name": "web",     // quoted key
+  metadata.labels.app: "web",          // dotted key: nests objects
+  ...base,                             // spread
+  if env == "prod" then { replicas: 3 },        // conditional fields
+  for k, v in extra => { [k]: v },     // computed keys from a comprehension
 }
 ```
 
-## 7. Checking pipeline
+Members are applied in order. When a key is set twice and both values are
+objects, they are merged deeply. Otherwise a duplicate key is an error.
 
-1. **Parse.**
-2. **Desugar:** tuples to records, parameter-named refinements to `self`
-   refinements, alias expansion.
-3. **Base checking:** bidirectional checking with refinements erased.
-   Top-level functions need annotations; local `let`s are inferred.
-4. **Normalization** (§4).
-5. **Refinement checking:** generate VCs (§5.2) and discharge them with SMT.
-   Liquid-style inference of local refinements is optional, not in v1.
-6. **Codegen:** erase refinements, keep runtime tags for primitives, nominal
-   types, and enum variants. A nominal type may be unboxed when the compiler
-   proves it never appears in a discriminated union.
+### 5.2 List literals
 
-## 8. Open questions
+```ts
+[ a, ...rest, if debug then sidecar, for c in containers => c.name ]
+```
 
-- Whether to add surface intersection types.
-- Whether variance on nominal types should be inferred instead of declared.
-- Module system and visibility (needed for nominal types to be truly opaque).
-- Effects and errors: is `Result`-via-union (`T | Err`) the idiom?
+The body of a `for` may be an `if` without `else`, which filters:
+`for c in cs => if c.enabled then c`.
+
+### 5.3 Patterns
+
+Same as v0.1: `_`, `x`, `x: T` (type test), literals, `(p, q)`, `{ f: p, .. }`.
+Literal patterns cover their literal type, so a `match` over
+`"dev" | "staging" | "prod"`, or over `true` and `false`, can be exhaustive
+without `_`. Type tests narrow unions, which makes discriminated unions on a
+`kind` field work as in TypeScript:
+
+```ts
+match r {
+  d: { kind: "Deployment", .. } => d.spec.replicas ?? 1,
+  _ => 0,
+}
+```
+
+### 5.4 Built-in functions
+
+`len`, `keys`, `values`, `str`, `upper`, `lower`, `join`, `split`,
+`contains`, `starts_with`, `ends_with`, `replace`, `matches` (regex), `min`,
+`max`, `sort`, `to_json`, `to_yaml`, `b64encode`, `error`. `error(msg)` has type `Never` and
+aborts evaluation with `msg`.
+
+## 6. Refinements
+
+`T where φ` restricts `T` to values satisfying the predicate `φ`, in which
+`self` is the value. In a field or parameter, the field or parameter's name
+may be used instead of `self`. A parameter's predicate may mention earlier
+parameters.
+
+```ts
+type DnsLabel = Str where len(self) <= 63 && matches(self, "^[a-z0-9]([-a-z0-9]*[a-z0-9])?$")
+type Port     = Int where 1 <= self && self <= 65535
+fn clamp(lo: Int, hi: Int where hi >= lo, x: Int) -> Int = ...
+```
+
+Predicates may use any expression of the language. Every expression is pure
+and total, so predicates can always be evaluated.
+
+**Static.** `tl check` turns each place a value flows into a refined type
+into a verification condition (VC). VCs decided by constant folding or by
+known facts (path conditions, other refinements) are reported: a refuted VC
+is a compile error. All other VCs become runtime checks. An SMT backend may
+later decide more of them statically; it is not required.
+
+**Dynamic.** During evaluation, every value that crosses an annotation is
+checked against the annotated type: inputs, function arguments and results,
+annotated `let`s, and `T { ... }`. These checks enforce both structure and
+refinements.
+
+## 7. Checking and evaluation
+
+1. Parse.
+2. Resolve types. Check expressions bidirectionally against expected types.
+   Diagnostics are field-aware: an unknown field suggests the closest known
+   name.
+3. Generate VCs (§6).
+4. Evaluate, in order: inputs (§8), then top-level `let`s, then `export`s.
+   Annotated boundaries check and complete values (fill in defaults, drop
+   optional `null`s).
+5. Serialize to YAML (multiple documents) or JSON. Strings are always quoted
+   where YAML would otherwise read them as something else (`no`, `1.0`, `~`).
+
+## 8. Inputs
+
+An input's value is decoded according to its declared type:
+
+- From a JSON file (`--input values.json`), which holds an object of inputs.
+- From the command line (`--set replicas=3`). If the type accepts the raw
+  string, the input is that string. Otherwise the string is parsed as JSON.
+  So `--set name=web` is a string and `--set replicas=3` is an int.
+- From Argo CD (`--argocd`), which reads the `ARGOCD_APP_PARAMETERS`
+  environment variable. String parameters are decoded as with `--set`; array
+  and map parameters as lists and maps.
+
+A missing input without a default, an unknown input name, or a value that
+does not fit the type is an error before evaluation starts. The error names
+the input and shows the expected type.
+
+## 9. Components and dependencies
+
+```ts
+export db = [ postgres_deployment, postgres_service ]
+export config = [ app_config ]
+export app after db, config = [ api_deployment, api_service ]
+```
+
+A named export is a component. `after` lists the components that must be
+healthy before it is applied. Names must exist, a component cannot depend on
+itself, and cycles are compile errors that show the cycle (`a -> b -> a`).
+Unnamed exports belong to an implicit component called `default` with no
+dependencies.
+
+A component's **wave** is 0 if it has no dependencies, otherwise one more
+than the largest wave among its dependencies. The output target decides how
+dependencies reach the cluster:
+
+| Target | Output |
+|---|---|
+| `plain` | All documents as one YAML stream, in wave order. |
+| `argocd` | As `plain`, with `metadata.annotations["argocd.argoproj.io/sync-wave"]` set to the component's wave. A sync-wave annotation already present in the document is kept. |
+| `flux` | `<out>/<component>/resources.yaml` per component, plus `<out>/flux-kustomizations.yaml` with one Flux `Kustomization` per component (`kustomize.toolkit.fluxcd.io/v1`). Each has `path` pointing at its directory, `dependsOn` from `after`, and `wait: true`, so dependents wait for health, not just for the apply. |
+
+## 10. Roadmap
+
+1. ~~Core language, evaluator, YAML/JSON output, typed inputs.~~ Done.
+2. ~~Components with `after`; Argo CD sync waves; Flux `dependsOn`.~~ Done.
+3. Kubernetes OpenAPI import: `import k8s from "k8s:1.31"` and CRDs, mapped to
+   record types (`apiVersion`/`kind` as literal fields, OpenAPI enums as
+   literal unions, `int-or-string` as `Int | Str`). **Next.**
+4. `e with { path: v }` typed patches, including list items selected by key
+   (`containers[name == "api"]`).
+5. Argo CD config-management plugin: a `plugin.yaml`, and parameters
+   announced to the Argo CD UI from the `input` declarations.
+   (`--argocd-params` already reads `ARGOCD_APP_PARAMETERS`.)
+6. Modules and imports of local files.
+
+## 11. Open questions
+
+- Totality: keep the no-recursion rule, or allow recursion with a fuel limit?
+- Should field order in the output follow the schema or the source?
+- Strategic-merge semantics for `with` on keyed lists without an explicit
+  selector.
+- Defaults inside `type` declarations are checked with no variables in scope,
+  so they can't refer to inputs or `let`s. Is that the right rule?
+- Should components be able to set an explicit wave offset, or Flux options
+  like `timeout`, per component?

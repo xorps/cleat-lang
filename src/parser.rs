@@ -1,24 +1,22 @@
 use crate::ast::*;
 use crate::diag::{Diag, Span};
-use crate::lexer::{Tok, Token, lex};
+use crate::lexer::{StrPart, Tok, Token, lex};
 
 type PResult<T> = Result<T, Diag>;
 
-pub fn parse_program(src: &str) -> PResult<Vec<Decl>> {
-    let toks = lex(src)?;
-    let mut p = Parser { toks, pos: 0, no_struct: false };
-    let mut decls = Vec::new();
+pub fn parse_program(src: &str) -> PResult<Vec<Item>> {
+    let mut p = Parser { toks: lex(src)?, pos: 0, no_struct: false };
+    let mut items = Vec::new();
     while *p.peek() != Tok::Eof {
-        decls.push(p.decl()?);
+        items.push(p.item()?);
     }
-    Ok(decls)
+    Ok(items)
 }
 
 struct Parser {
     toks: Vec<Token>,
     pos: usize,
-    /// When set, `E.V {` is not parsed as a variant record literal
-    /// (so `if x == E.V { .. }` works), like Rust's struct-literal restriction.
+    /// When set, `T {` is not parsed as a typed object literal (match scrutinees, predicates).
     no_struct: bool,
 }
 
@@ -52,8 +50,45 @@ fn binop(t: &Tok) -> Option<BinOp> {
         Tok::Ge => BinOp::Ge,
         Tok::AndAnd => BinOp::And,
         Tok::OrOr => BinOp::Or,
+        Tok::QQ => BinOp::Coalesce,
         _ => return None,
     })
+}
+
+/// Add `path: value` to an object's members, nesting dotted paths and merging
+/// into an existing object literal for the same key.
+fn insert_member(members: &mut Vec<Member>, path: &[String], value: Expr, span: Span) {
+    let key = &path[0];
+    let idx = members
+        .iter()
+        .rposition(|m| matches!(m, Member::Field(k, Expr { kind: ExprKind::Object(_), .. }, _) if k == key));
+    if path.len() == 1 {
+        match (idx, value.kind) {
+            (Some(i), ExprKind::Object(new)) => {
+                let ms = nested_members(members, i);
+                for m in new {
+                    match m {
+                        Member::Field(k, v, s) => insert_member(ms, &[k], v, s),
+                        other => ms.push(other),
+                    }
+                }
+            }
+            (_, kind) => members.push(Member::Field(key.clone(), Expr::new(kind, value.span), span)),
+        }
+        return;
+    }
+    let i = idx.unwrap_or_else(|| {
+        members.push(Member::Field(key.clone(), Expr::new(ExprKind::Object(Vec::new()), span), span));
+        members.len() - 1
+    });
+    insert_member(nested_members(members, i), &path[1..], value, span);
+}
+
+fn nested_members(members: &mut [Member], i: usize) -> &mut Vec<Member> {
+    match &mut members[i] {
+        Member::Field(_, Expr { kind: ExprKind::Object(ms), .. }, _) => ms,
+        _ => unreachable!("index points at an object-valued field"),
+    }
 }
 
 impl Parser {
@@ -105,54 +140,62 @@ impl Parser {
         }
     }
 
-    // ---------- declarations ----------
+    /// A plain string literal (no interpolation), e.g. a quoted key.
+    fn plain_str(&self) -> Option<String> {
+        match self.peek() {
+            Tok::Str(parts) => match parts.as_slice() {
+                [StrPart::Lit(s)] => Some(s.clone()),
+                _ => None,
+            },
+            _ => None,
+        }
+    }
 
-    fn decl(&mut self) -> PResult<Decl> {
+    /// An object key: identifier, keyword, or plain string.
+    fn key(&mut self) -> PResult<(String, Span)> {
+        let span = self.span();
+        let k = match self.peek() {
+            Tok::Ident(s) => s.clone(),
+            t if t.keyword_text().is_some() => t.keyword_text().unwrap().to_string(),
+            Tok::Str(_) => match self.plain_str() {
+                Some(s) => s,
+                None => return Err(Diag::new(span, "object keys cannot use interpolation; use `[expr]: value`")),
+            },
+            _ => return self.err("key"),
+        };
+        self.bump();
+        Ok((k, span))
+    }
+
+    fn is_key_start(&self) -> bool {
+        matches!(self.peek(), Tok::Ident(_) | Tok::Str(_)) || self.peek().keyword_text().is_some()
+    }
+
+    // ---------- items ----------
+
+    fn item(&mut self) -> PResult<Item> {
         let span = self.span();
         match self.peek() {
-            Tok::Type | Tok::Nominal => {
-                let nominal = *self.peek() == Tok::Nominal;
+            Tok::Type => {
                 self.bump();
                 let (name, _) = self.ident()?;
                 self.expect(&Tok::Eq)?;
-                let ty = self.ty()?;
-                Ok(if nominal { Decl::Nominal { name, ty, span } } else { Decl::Type { name, ty, span } })
+                Ok(Item::Type { name, ty: self.ty()?, span })
             }
-            Tok::Enum => {
+            Tok::Input => {
                 self.bump();
                 let (name, _) = self.ident()?;
-                self.expect(&Tok::LBrace)?;
-                let mut variants = Vec::new();
-                loop {
-                    if self.eat(&Tok::RBrace) {
-                        break;
-                    }
-                    let (vname, vspan) = self.ident()?;
-                    let payload = match self.peek() {
-                        Tok::LBrace => {
-                            let ps = self.span();
-                            self.bump();
-                            let (fields, open) = self.field_types()?;
-                            if open {
-                                return Err(Diag::new(ps, "enum variant payloads must be exact records"));
-                            }
-                            Some(TypeExpr { kind: TypeKind::Record { fields, open: false }, span: ps })
-                        }
-                        Tok::LParen => {
-                            let ps = self.span();
-                            self.bump();
-                            let (tys, _) = self.ty_list()?;
-                            Some(TypeExpr { kind: TypeKind::Record { fields: positional(tys), open: false }, span: ps })
-                        }
-                        _ => None,
-                    };
-                    variants.push(VariantDecl { name: vname, payload, span: vspan });
-                    if !self.eat(&Tok::Comma) {
-                        self.expect(&Tok::RBrace)?;
-                        break;
-                    }
-                }
-                Ok(Decl::Enum { name, variants, span })
+                self.expect(&Tok::Colon)?;
+                let ty = rebind(self.ty()?, &name);
+                let default = if self.eat(&Tok::Eq) { Some(self.expr_s()?) } else { None };
+                Ok(Item::Input { name, ty, default, span })
+            }
+            Tok::Let => {
+                self.bump();
+                let (name, _) = self.ident()?;
+                let ty = if self.eat(&Tok::Colon) { Some(rebind(self.ty()?, &name)) } else { None };
+                self.expect(&Tok::Eq)?;
+                Ok(Item::Let { name, ty, value: self.expr_s()?, span })
             }
             Tok::Fn => {
                 self.bump();
@@ -166,17 +209,41 @@ impl Parser {
                     let (p, ps) = self.ident()?;
                     self.expect(&Tok::Colon)?;
                     let ty = rebind(self.ty()?, &p);
-                    params.push((p, ty, ps));
+                    let default = if self.eat(&Tok::Eq) { Some(self.expr_s()?) } else { None };
+                    params.push(Param { name: p, ty, default, span: ps });
                     if !self.eat(&Tok::Comma) {
                         self.expect(&Tok::RParen)?;
                         break;
                     }
                 }
                 let ret = if self.eat(&Tok::Arrow) { Some(self.ty()?) } else { None };
-                let body = self.block()?;
-                Ok(Decl::Fn(FnDecl { name, params, ret, body, span }))
+                self.expect(&Tok::Eq)?;
+                let body = self.expr_s()?;
+                Ok(Item::Fn(FnDecl { name, params, ret, body, span }))
             }
-            _ => self.err("declaration (`type`, `nominal`, `enum` or `fn`)"),
+            Tok::Export => {
+                self.bump();
+                // `export name =` / `export name after a, b =` declare a component;
+                // `after` is a contextual keyword.
+                let named = matches!(self.peek(), Tok::Ident(_))
+                    && (matches!(self.peek_at(1), Tok::Eq) || matches!(self.peek_at(1), Tok::Ident(a) if a == "after"));
+                let mut name = None;
+                let mut after = Vec::new();
+                if named {
+                    name = Some(self.ident()?.0);
+                    if self.eat(&Tok::Ident("after".into())) {
+                        loop {
+                            after.push(self.ident()?);
+                            if !self.eat(&Tok::Comma) {
+                                break;
+                            }
+                        }
+                    }
+                    self.expect(&Tok::Eq)?;
+                }
+                Ok(Item::Export { name, after, value: self.expr_s()?, span })
+            }
+            _ => self.err("`type`, `input`, `let`, `fn` or `export`"),
         }
     }
 
@@ -195,7 +262,7 @@ impl Parser {
             TypeExpr { kind: TypeKind::Union(members), span }
         };
         if self.eat(&Tok::Where) {
-            let pred = self.expr_ns()?;
+            let pred = self.with_struct(false, |p| p.expr())?;
             if *self.peek() == Tok::Pipe {
                 return self.err("end of refined type (wrap refined union members in parentheses)");
             }
@@ -209,60 +276,96 @@ impl Parser {
         let kind = match self.peek().clone() {
             Tok::Ident(n) => {
                 self.bump();
-                if *self.peek() == Tok::Dot && matches!(self.peek_at(1), Tok::Ident(_)) {
-                    self.bump();
-                    let (v, _) = self.ident()?;
-                    TypeKind::Path(n, v)
-                } else {
-                    TypeKind::Named(n)
+                TypeKind::Named(n)
+            }
+            Tok::Null => {
+                self.bump();
+                TypeKind::Lit(Lit::Null)
+            }
+            Tok::True | Tok::False => {
+                let b = *self.peek() == Tok::True;
+                self.bump();
+                TypeKind::Lit(Lit::Bool(b))
+            }
+            Tok::Int(n) => {
+                self.bump();
+                TypeKind::Lit(Lit::Int(n))
+            }
+            Tok::Float(x) => {
+                self.bump();
+                TypeKind::Lit(Lit::Float(x))
+            }
+            Tok::Minus => {
+                self.bump();
+                match self.peek().clone() {
+                    Tok::Int(n) => {
+                        self.bump();
+                        TypeKind::Lit(Lit::Int(-n))
+                    }
+                    Tok::Float(x) => {
+                        self.bump();
+                        TypeKind::Lit(Lit::Float(-x))
+                    }
+                    _ => return self.err("number"),
                 }
+            }
+            Tok::Str(_) => match self.plain_str() {
+                Some(s) => {
+                    self.bump();
+                    TypeKind::Lit(Lit::Str(s))
+                }
+                None => return Err(Diag::new(span, "string literal types cannot use interpolation")),
+            },
+            Tok::LBracket => {
+                self.bump();
+                let elem = self.ty()?;
+                self.expect(&Tok::RBracket)?;
+                TypeKind::List(Box::new(elem))
             }
             Tok::LParen => {
                 self.bump();
-                let (mut tys, trailing) = self.ty_list()?;
+                let mut tys = Vec::new();
+                let mut trailing = false;
+                loop {
+                    if self.eat(&Tok::RParen) {
+                        break;
+                    }
+                    tys.push(self.ty()?);
+                    trailing = self.eat(&Tok::Comma);
+                    if !trailing {
+                        self.expect(&Tok::RParen)?;
+                        break;
+                    }
+                }
                 if tys.len() == 1 && !trailing {
                     return Ok(tys.pop().unwrap());
                 }
-                TypeKind::Record { fields: positional(tys), open: false }
+                TypeKind::Tuple(tys)
             }
             Tok::LBrace => {
                 self.bump();
-                let (fields, open) = self.field_types()?;
-                TypeKind::Record { fields, open }
-            }
-            Tok::Fn => {
-                self.bump();
-                self.expect(&Tok::LParen)?;
-                let (params, _) = self.ty_list()?;
-                self.expect(&Tok::Arrow)?;
-                let ret = self.ty()?;
-                TypeKind::Fn(params, Box::new(ret))
+                if self.eat(&Tok::LBracket) {
+                    let key = self.ty()?;
+                    if !matches!(&key.kind, TypeKind::Named(n) if n == "Str") {
+                        return Err(Diag::new(key.span, "map keys must be `Str`"));
+                    }
+                    self.expect(&Tok::RBracket)?;
+                    self.expect(&Tok::Colon)?;
+                    let val = self.ty()?;
+                    self.eat(&Tok::Comma);
+                    self.expect(&Tok::RBrace)?;
+                    TypeKind::Map(Box::new(val))
+                } else {
+                    self.record_type()?
+                }
             }
             _ => return self.err("type"),
         };
         Ok(TypeExpr { kind, span })
     }
 
-    /// Comma-separated types up to and including `)`. Returns whether there was a trailing comma.
-    fn ty_list(&mut self) -> PResult<(Vec<TypeExpr>, bool)> {
-        let mut v = Vec::new();
-        let mut trailing = false;
-        loop {
-            if self.eat(&Tok::RParen) {
-                break;
-            }
-            v.push(self.ty()?);
-            trailing = self.eat(&Tok::Comma);
-            if !trailing {
-                self.expect(&Tok::RParen)?;
-                break;
-            }
-        }
-        Ok((v, trailing))
-    }
-
     /// Record type fields after `{`, up to and including `}`.
-    fn field_types(&mut self) -> PResult<(Vec<(Label, TypeExpr)>, bool)> {
+    fn record_type(&mut self) -> PResult<TypeKind> {
         let mut fields = Vec::new();
         let mut open = false;
         loop {
@@ -271,26 +374,25 @@ impl Parser {
             }
             if self.eat(&Tok::DotDot) {
                 open = true;
+                self.eat(&Tok::Comma);
                 self.expect(&Tok::RBrace)?;
                 break;
             }
-            let (name, _) = self.ident()?;
+            let (name, span) = self.key()?;
+            let optional = self.eat(&Tok::Question);
             self.expect(&Tok::Colon)?;
             let ty = rebind(self.ty()?, &name);
-            fields.push((Label::Name(name), ty));
+            let default = if self.eat(&Tok::Eq) { Some(self.expr_s()?) } else { None };
+            fields.push(FieldDecl { name, ty, optional, default, span });
             if !self.eat(&Tok::Comma) {
                 self.expect(&Tok::RBrace)?;
                 break;
             }
         }
-        Ok((fields, open))
+        Ok(TypeKind::Record { fields, open })
     }
 
     // ---------- expressions ----------
-
-    fn expr(&mut self) -> PResult<Expr> {
-        self.bin(1)
-    }
 
     fn with_struct<T>(&mut self, allow: bool, f: impl FnOnce(&mut Self) -> PResult<T>) -> PResult<T> {
         let old = std::mem::replace(&mut self.no_struct, !allow);
@@ -299,12 +401,46 @@ impl Parser {
         r
     }
 
+    /// An expression in a context where `T { ... }` is allowed.
     fn expr_s(&mut self) -> PResult<Expr> {
         self.with_struct(true, |p| p.expr())
     }
 
-    fn expr_ns(&mut self) -> PResult<Expr> {
-        self.with_struct(false, |p| p.expr())
+    fn expr(&mut self) -> PResult<Expr> {
+        match self.peek() {
+            Tok::If => self.if_expr(),
+            Tok::Let => self.let_expr(),
+            _ => self.bin(1),
+        }
+    }
+
+    fn if_expr(&mut self) -> PResult<Expr> {
+        let span = self.span();
+        self.expect(&Tok::If)?;
+        let cond = self.expr_s()?;
+        self.expect(&Tok::Then)?;
+        let then = self.expr()?;
+        if *self.peek() != Tok::Else {
+            return Err(Diag::new(
+                self.span(),
+                "`if` expression needs an `else` (an `if` without `else` is only allowed inside list and object literals)",
+            ));
+        }
+        self.bump();
+        let els = self.expr()?;
+        Ok(Expr::new(ExprKind::If(Box::new(cond), Box::new(then), Box::new(els)), span))
+    }
+
+    fn let_expr(&mut self) -> PResult<Expr> {
+        let span = self.span();
+        self.expect(&Tok::Let)?;
+        let (name, _) = self.ident()?;
+        let ty = if self.eat(&Tok::Colon) { Some(rebind(self.ty()?, &name)) } else { None };
+        self.expect(&Tok::Eq)?;
+        let value = self.expr_s()?;
+        self.expect(&Tok::Semi)?;
+        let body = self.expr()?;
+        Ok(Expr::new(ExprKind::Let(name, ty.map(Box::new), Box::new(value), Box::new(body)), span))
     }
 
     fn bin(&mut self, min: u8) -> PResult<Expr> {
@@ -315,7 +451,8 @@ impl Parser {
                 break;
             }
             self.bump();
-            let rhs = self.bin(p + 1)?;
+            // `a ?? if c then x else y` and similar: allow if/let on the right.
+            let rhs = if matches!(self.peek(), Tok::If | Tok::Let) { self.expr()? } else { self.bin(p + 1)? };
             lhs = Expr::binary(op, lhs, rhs);
         }
         Ok(lhs)
@@ -337,21 +474,26 @@ impl Parser {
         let mut e = self.primary()?;
         loop {
             match self.peek() {
-                Tok::Dot => {
+                Tok::Dot | Tok::QDot => {
+                    let optional = *self.peek() == Tok::QDot;
                     self.bump();
                     let label = match self.peek().clone() {
-                        Tok::Int(n) if n >= 0 => Label::Pos(n as usize),
-                        Tok::Ident(s) => Label::Name(s),
+                        Tok::Int(n) if n >= 0 => {
+                            self.bump();
+                            Label::Pos(n as usize)
+                        }
+                        _ if self.is_key_start() => Label::Name(self.key()?.0),
                         _ => return self.err("field name or tuple index"),
                     };
-                    self.bump();
-                    e = Expr::field(e, label);
+                    let span = e.span;
+                    e = Expr::new(ExprKind::Field(Box::new(e), label, optional), span);
                 }
-                Tok::LParen => {
+                Tok::LBracket => {
                     let span = e.span;
                     self.bump();
-                    let args = self.expr_list()?;
-                    e = Expr::new(ExprKind::Call(Box::new(e), args), span);
+                    let idx = self.expr_s()?;
+                    self.expect(&Tok::RBracket)?;
+                    e = Expr::new(ExprKind::Index(Box::new(e), Box::new(idx)), span);
                 }
                 _ => break,
             }
@@ -359,168 +501,260 @@ impl Parser {
         Ok(e)
     }
 
-    /// Comma-separated expressions up to and including `)`. Returns whether there was a trailing comma.
-    fn expr_list_t(&mut self) -> PResult<(Vec<Expr>, bool)> {
-        let mut v = Vec::new();
-        let mut trailing = false;
-        loop {
-            if self.eat(&Tok::RParen) {
-                break;
-            }
-            v.push(self.expr_s()?);
-            trailing = self.eat(&Tok::Comma);
-            if !trailing {
-                self.expect(&Tok::RParen)?;
-                break;
-            }
-        }
-        Ok((v, trailing))
-    }
-
-    fn expr_list(&mut self) -> PResult<Vec<Expr>> {
-        Ok(self.expr_list_t()?.0)
-    }
-
-    /// Record literal fields after `{`, up to and including `}`.
-    fn record_fields(&mut self) -> PResult<Vec<(Label, Expr)>> {
-        let mut fields = Vec::new();
-        loop {
-            if self.eat(&Tok::RBrace) {
-                break;
-            }
-            let (name, _) = self.ident()?;
-            self.expect(&Tok::Colon)?;
-            fields.push((Label::Name(name), self.expr_s()?));
-            if !self.eat(&Tok::Comma) {
-                self.expect(&Tok::RBrace)?;
-                break;
-            }
-        }
-        Ok(fields)
-    }
-
     fn primary(&mut self) -> PResult<Expr> {
         let span = self.span();
         let kind = match self.peek().clone() {
             Tok::Int(n) => {
                 self.bump();
-                ExprKind::Int(n)
+                ExprKind::Lit(Lit::Int(n))
             }
             Tok::Float(x) => {
                 self.bump();
-                ExprKind::Float(x)
-            }
-            Tok::Str(s) => {
-                self.bump();
-                ExprKind::Str(s)
+                ExprKind::Lit(Lit::Float(x))
             }
             Tok::True | Tok::False => {
                 let b = *self.peek() == Tok::True;
                 self.bump();
-                ExprKind::Bool(b)
+                ExprKind::Lit(Lit::Bool(b))
+            }
+            Tok::Null => {
+                self.bump();
+                ExprKind::Lit(Lit::Null)
+            }
+            Tok::Str(parts) => {
+                self.bump();
+                self.string(parts)?
             }
             Tok::Ident(n) => {
                 self.bump();
-                let is_path = is_upper(&n)
-                    && *self.peek() == Tok::Dot
-                    && matches!(self.peek_at(1), Tok::Ident(v) if is_upper(v));
-                if !is_path {
-                    ExprKind::Var(n)
-                } else {
-                    self.bump();
-                    let (variant, _) = self.ident()?;
-                    let ps = self.span();
-                    let payload = match self.peek() {
-                        Tok::LParen => {
-                            self.bump();
-                            let args = self.expr_list()?;
-                            Some(Box::new(Expr::new(ExprKind::Record(positional(args)), ps)))
-                        }
-                        Tok::LBrace if !self.no_struct => {
-                            self.bump();
-                            let fields = self.record_fields()?;
-                            Some(Box::new(Expr::new(ExprKind::Record(fields), ps)))
-                        }
-                        _ => None,
-                    };
-                    ExprKind::Variant { enum_name: n, variant, payload }
+                match self.peek() {
+                    Tok::LParen => {
+                        self.bump();
+                        ExprKind::Call(n, self.args()?)
+                    }
+                    Tok::LBrace if is_upper(&n) && !self.no_struct => {
+                        let obj = self.object()?;
+                        ExprKind::Typed(n, Box::new(obj))
+                    }
+                    _ => ExprKind::Var(n),
                 }
             }
             Tok::LParen => {
                 self.bump();
-                let (mut items, trailing) = self.expr_list_t()?;
+                let mut items = Vec::new();
+                let mut trailing = false;
+                loop {
+                    if self.eat(&Tok::RParen) {
+                        break;
+                    }
+                    items.push(self.expr_s()?);
+                    trailing = self.eat(&Tok::Comma);
+                    if !trailing {
+                        self.expect(&Tok::RParen)?;
+                        break;
+                    }
+                }
                 if items.len() == 1 && !trailing {
                     return Ok(items.pop().unwrap());
                 }
-                ExprKind::Record(positional(items))
+                ExprKind::Tuple(items)
             }
-            Tok::LBrace => {
-                let is_record = matches!(self.peek_at(1), Tok::Ident(_)) && *self.peek_at(2) == Tok::Colon;
-                if !is_record {
-                    return self.block();
-                }
-                self.bump();
-                ExprKind::Record(self.record_fields()?)
-            }
-            Tok::If => return self.if_expr(),
+            Tok::LBracket => return self.list(),
+            Tok::LBrace => return self.object(),
             Tok::Match => return self.match_expr(),
+            Tok::If | Tok::Let => return self.expr(),
             _ => return self.err("expression"),
         };
         Ok(Expr::new(kind, span))
     }
 
-    fn block(&mut self) -> PResult<Expr> {
+    fn string(&mut self, parts: Vec<StrPart>) -> PResult<ExprKind> {
+        if let [StrPart::Lit(s)] = parts.as_slice() {
+            return Ok(ExprKind::Lit(Lit::Str(s.clone())));
+        }
+        let mut out = Vec::new();
+        for part in parts {
+            match part {
+                StrPart::Lit(s) => out.push(InterpPart::Lit(s)),
+                StrPart::Interp(toks) => {
+                    let mut sub = Parser { toks, pos: 0, no_struct: false };
+                    let e = sub.expr()?;
+                    if *sub.peek() != Tok::Eof {
+                        return sub.err("`)` to close the interpolation");
+                    }
+                    out.push(InterpPart::Expr(e));
+                }
+            }
+        }
+        Ok(ExprKind::Interp(out))
+    }
+
+    /// Call arguments after `(`, up to and including `)`. `name: e` is a named argument.
+    fn args(&mut self) -> PResult<Vec<Arg>> {
+        let mut args = Vec::new();
+        loop {
+            if self.eat(&Tok::RParen) {
+                break;
+            }
+            let name = match (self.peek(), self.peek_at(1)) {
+                (Tok::Ident(n), Tok::Colon) => {
+                    let n = n.clone();
+                    self.bump();
+                    self.bump();
+                    Some(n)
+                }
+                _ => None,
+            };
+            args.push(Arg { name, value: self.expr_s()? });
+            if !self.eat(&Tok::Comma) {
+                self.expect(&Tok::RParen)?;
+                break;
+            }
+        }
+        Ok(args)
+    }
+
+    fn list(&mut self) -> PResult<Expr> {
+        let span = self.span();
+        self.expect(&Tok::LBracket)?;
+        let mut items = Vec::new();
+        loop {
+            if self.eat(&Tok::RBracket) {
+                break;
+            }
+            items.push(self.list_item()?);
+            if !self.eat(&Tok::Comma) {
+                self.expect(&Tok::RBracket)?;
+                break;
+            }
+        }
+        Ok(Expr::new(ExprKind::List(items), span))
+    }
+
+    fn list_item(&mut self) -> PResult<ListItem> {
+        match self.peek() {
+            Tok::Ellipsis => {
+                self.bump();
+                Ok(ListItem::Spread(self.expr_s()?))
+            }
+            Tok::If => {
+                let span = self.span();
+                self.bump();
+                let cond = self.expr_s()?;
+                self.expect(&Tok::Then)?;
+                let inner = self.list_item()?;
+                if self.eat(&Tok::Else) {
+                    let ListItem::Elem(then) = inner else {
+                        return Err(Diag::new(span, "an `if` with `else` in a list must produce a single element"));
+                    };
+                    let els = self.expr_s()?;
+                    return Ok(ListItem::Elem(Expr::new(ExprKind::If(Box::new(cond), Box::new(then), Box::new(els)), span)));
+                }
+                Ok(ListItem::If(cond, Box::new(inner)))
+            }
+            Tok::For => {
+                self.bump();
+                let (a, b, src) = self.for_head()?;
+                Ok(ListItem::For(a, b, src, Box::new(self.list_item()?)))
+            }
+            _ => Ok(ListItem::Elem(self.expr_s()?)),
+        }
+    }
+
+    /// `x in e =>` or `k, v in e =>` (after `for`).
+    fn for_head(&mut self) -> PResult<(String, Option<String>, Expr)> {
+        let (a, _) = self.ident()?;
+        let b = if self.eat(&Tok::Comma) { Some(self.ident()?.0) } else { None };
+        self.expect(&Tok::In)?;
+        let src = self.expr_s()?;
+        self.expect(&Tok::FatArrow)?;
+        Ok((a, b, src))
+    }
+
+    fn object(&mut self) -> PResult<Expr> {
         let span = self.span();
         self.expect(&Tok::LBrace)?;
-        let mut stmts = Vec::new();
-        let mut tail = None;
+        let members = self.members()?;
+        Ok(Expr::new(ExprKind::Object(members), span))
+    }
+
+    /// Object members after `{`, up to and including `}`.
+    fn members(&mut self) -> PResult<Vec<Member>> {
+        let mut members = Vec::new();
         loop {
             if self.eat(&Tok::RBrace) {
                 break;
             }
-            if *self.peek() == Tok::Let {
-                let sp = self.span();
-                self.bump();
-                let (name, _) = self.ident()?;
-                let ty = if self.eat(&Tok::Colon) { Some(rebind(self.ty()?, &name)) } else { None };
-                self.expect(&Tok::Eq)?;
-                let value = self.expr_s()?;
-                self.expect(&Tok::Semi)?;
-                stmts.push(Stmt::Let { name, ty, value, span: sp });
-                continue;
-            }
-            let e = self.expr_s()?;
-            if self.eat(&Tok::Semi) {
-                stmts.push(Stmt::Expr(e));
-            } else if self.eat(&Tok::RBrace) {
-                tail = Some(Box::new(e));
+            self.member(&mut members)?;
+            if !self.eat(&Tok::Comma) {
+                self.expect(&Tok::RBrace)?;
                 break;
-            } else if e.is_blocklike() {
-                stmts.push(Stmt::Expr(e));
-            } else {
-                return self.err("`;` or `}`");
             }
         }
-        Ok(Expr::new(ExprKind::Block(stmts, tail), span))
+        Ok(members)
     }
 
-    fn if_expr(&mut self) -> PResult<Expr> {
-        let span = self.span();
-        self.expect(&Tok::If)?;
-        let cond = self.expr_ns()?;
-        let then = self.block()?;
-        let els = if self.eat(&Tok::Else) {
-            Some(Box::new(if *self.peek() == Tok::If { self.if_expr()? } else { self.block()? }))
-        } else {
-            None
-        };
-        Ok(Expr::new(ExprKind::If(Box::new(cond), Box::new(then), els), span))
+    fn member(&mut self, members: &mut Vec<Member>) -> PResult<()> {
+        let keyword_as_key = matches!(self.peek_at(1), Tok::Colon | Tok::Dot);
+        match self.peek() {
+            Tok::Ellipsis => {
+                self.bump();
+                members.push(Member::Spread(self.expr_s()?));
+            }
+            Tok::If if !keyword_as_key => {
+                self.bump();
+                let cond = self.expr_s()?;
+                self.expect(&Tok::Then)?;
+                self.expect(&Tok::LBrace)?;
+                let then = self.members()?;
+                let els = if self.eat(&Tok::Else) {
+                    self.expect(&Tok::LBrace)?;
+                    Some(self.members()?)
+                } else {
+                    None
+                };
+                members.push(Member::If(cond, then, els));
+            }
+            Tok::For if !keyword_as_key => {
+                self.bump();
+                let (a, b, src) = self.for_head()?;
+                self.expect(&Tok::LBrace)?;
+                let body = self.members()?;
+                members.push(Member::For(a, b, src, body));
+            }
+            Tok::LBracket => {
+                self.bump();
+                let k = self.expr_s()?;
+                self.expect(&Tok::RBracket)?;
+                self.expect(&Tok::Colon)?;
+                members.push(Member::Computed(k, self.expr_s()?));
+            }
+            _ => {
+                let (first, span) = self.key()?;
+                let mut path = vec![first];
+                while self.eat(&Tok::Dot) {
+                    path.push(self.key()?.0);
+                }
+                if *self.peek() != Tok::Colon && path.len() == 1 {
+                    // Punning: `{ name }` means `{ name: name }`.
+                    if matches!(self.peek(), Tok::Comma | Tok::RBrace) {
+                        let v = Expr::var(&path[0], span);
+                        insert_member(members, &path, v, span);
+                        return Ok(());
+                    }
+                }
+                self.expect(&Tok::Colon)?;
+                let value = self.expr_s()?;
+                insert_member(members, &path, value, span);
+            }
+        }
+        Ok(())
     }
 
     fn match_expr(&mut self) -> PResult<Expr> {
         let span = self.span();
         self.expect(&Tok::Match)?;
-        let scrut = self.expr_ns()?;
+        let scrut = self.with_struct(false, |p| p.expr())?;
         self.expect(&Tok::LBrace)?;
         let mut arms = Vec::new();
         loop {
@@ -530,10 +764,10 @@ impl Parser {
             let pat = self.pat()?;
             self.expect(&Tok::FatArrow)?;
             let body = self.expr_s()?;
-            let blocklike = body.is_blocklike();
             arms.push(Arm { pat, body });
-            if !self.eat(&Tok::Comma) && *self.peek() != Tok::RBrace && !blocklike {
-                return self.err("`,` or `}` after match arm");
+            if !self.eat(&Tok::Comma) {
+                self.expect(&Tok::RBrace)?;
+                break;
             }
         }
         Ok(Expr::new(ExprKind::Match(Box::new(scrut), arms), span))
@@ -544,98 +778,103 @@ impl Parser {
     fn pat(&mut self) -> PResult<Pat> {
         let span = self.span();
         let kind = match self.peek().clone() {
-            Tok::Ident(n) if n == "_" => {
-                self.bump();
-                if self.eat(&Tok::Colon) { PatKind::Typed(None, self.ty()?) } else { PatKind::Wild }
-            }
-            Tok::Ident(n) if is_upper(&n) => {
-                self.bump();
-                self.expect(&Tok::Dot)?;
-                let (variant, _) = self.ident()?;
-                let payload = match self.peek() {
-                    Tok::LParen => {
-                        self.bump();
-                        let (ps, _) = self.pat_list()?;
-                        Some((positional(ps), false))
-                    }
-                    Tok::LBrace => {
-                        self.bump();
-                        Some(self.field_pats()?)
-                    }
-                    _ => None,
-                };
-                PatKind::Variant { enum_name: n, variant, payload }
-            }
             Tok::Ident(n) => {
                 self.bump();
-                if self.eat(&Tok::Colon) { PatKind::Typed(Some(n), self.ty()?) } else { PatKind::Bind(n) }
-            }
-            Tok::Int(_) | Tok::Float(_) | Tok::Str(_) | Tok::True | Tok::False => PatKind::Lit(self.primary()?),
-            Tok::Minus => {
-                self.bump();
-                let lit = self.primary()?;
-                match lit.kind {
-                    ExprKind::Int(n) => PatKind::Lit(Expr::new(ExprKind::Int(-n), span)),
-                    ExprKind::Float(x) => PatKind::Lit(Expr::new(ExprKind::Float(-x), span)),
-                    _ => return Err(Diag::new(span, "expected a numeric literal after `-` in pattern")),
+                let name = if n == "_" { None } else { Some(n) };
+                if self.eat(&Tok::Colon) {
+                    PatKind::Typed(name, self.ty()?)
+                } else {
+                    name.map_or(PatKind::Wild, PatKind::Bind)
                 }
             }
+            Tok::Null => {
+                self.bump();
+                PatKind::Lit(Lit::Null)
+            }
+            Tok::True | Tok::False => {
+                let b = *self.peek() == Tok::True;
+                self.bump();
+                PatKind::Lit(Lit::Bool(b))
+            }
+            Tok::Int(n) => {
+                self.bump();
+                PatKind::Lit(Lit::Int(n))
+            }
+            Tok::Float(x) => {
+                self.bump();
+                PatKind::Lit(Lit::Float(x))
+            }
+            Tok::Minus => {
+                self.bump();
+                match self.peek().clone() {
+                    Tok::Int(n) => {
+                        self.bump();
+                        PatKind::Lit(Lit::Int(-n))
+                    }
+                    Tok::Float(x) => {
+                        self.bump();
+                        PatKind::Lit(Lit::Float(-x))
+                    }
+                    _ => return self.err("number"),
+                }
+            }
+            Tok::Str(_) => match self.plain_str() {
+                Some(s) => {
+                    self.bump();
+                    PatKind::Lit(Lit::Str(s))
+                }
+                None => return Err(Diag::new(span, "string patterns cannot use interpolation")),
+            },
             Tok::LParen => {
                 self.bump();
-                let (mut ps, trailing) = self.pat_list()?;
+                let mut ps = Vec::new();
+                let mut trailing = false;
+                loop {
+                    if self.eat(&Tok::RParen) {
+                        break;
+                    }
+                    ps.push(self.pat()?);
+                    trailing = self.eat(&Tok::Comma);
+                    if !trailing {
+                        self.expect(&Tok::RParen)?;
+                        break;
+                    }
+                }
                 if ps.len() == 1 && !trailing {
                     return Ok(ps.pop().unwrap());
                 }
-                PatKind::Record(positional(ps), false)
+                PatKind::Tuple(ps)
             }
             Tok::LBrace => {
                 self.bump();
-                let (fields, open) = self.field_pats()?;
+                let mut fields = Vec::new();
+                let mut open = false;
+                loop {
+                    if self.eat(&Tok::RBrace) {
+                        break;
+                    }
+                    if self.eat(&Tok::DotDot) {
+                        open = true;
+                        self.eat(&Tok::Comma);
+                        self.expect(&Tok::RBrace)?;
+                        break;
+                    }
+                    let (name, span) = self.key()?;
+                    let pat = if self.eat(&Tok::Colon) {
+                        self.pat()?
+                    } else {
+                        Pat { kind: PatKind::Bind(name.clone()), span }
+                    };
+                    fields.push((name, pat));
+                    if !self.eat(&Tok::Comma) {
+                        self.expect(&Tok::RBrace)?;
+                        break;
+                    }
+                }
                 PatKind::Record(fields, open)
             }
             _ => return self.err("pattern"),
         };
         Ok(Pat { kind, span })
-    }
-
-    fn pat_list(&mut self) -> PResult<(Vec<Pat>, bool)> {
-        let mut v = Vec::new();
-        let mut trailing = false;
-        loop {
-            if self.eat(&Tok::RParen) {
-                break;
-            }
-            v.push(self.pat()?);
-            trailing = self.eat(&Tok::Comma);
-            if !trailing {
-                self.expect(&Tok::RParen)?;
-                break;
-            }
-        }
-        Ok((v, trailing))
-    }
-
-    /// Record pattern fields after `{`, up to and including `}`. `{ r }` puns to `{ r: r }`.
-    fn field_pats(&mut self) -> PResult<(Vec<(Label, Pat)>, bool)> {
-        let mut fields = Vec::new();
-        let mut open = false;
-        loop {
-            if self.eat(&Tok::RBrace) {
-                break;
-            }
-            if self.eat(&Tok::DotDot) {
-                open = true;
-                self.expect(&Tok::RBrace)?;
-                break;
-            }
-            let (name, span) = self.ident()?;
-            let pat = if self.eat(&Tok::Colon) { self.pat()? } else { Pat { kind: PatKind::Bind(name.clone()), span } };
-            fields.push((Label::Name(name), pat));
-            if !self.eat(&Tok::Comma) {
-                self.expect(&Tok::RBrace)?;
-                break;
-            }
-        }
-        Ok((fields, open))
     }
 }
