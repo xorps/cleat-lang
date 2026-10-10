@@ -1,0 +1,96 @@
+{
+  "$schema": "https://raw.githubusercontent.com/martinring/tmlanguage/master/tmlanguage.json",
+  "name": "Cleat",
+  "scopeName": "source.cleat",
+  "patterns": [
+    { "include": "#comment" },
+    { "include": "#declaration" },
+    { "include": "#export" },
+    { "include": "#string" },
+    { "include": "#number" },
+    { "include": "#keyword" },
+    { "include": "#constant" },
+    { "include": "#type" },
+    { "include": "#call" },
+    { "include": "#key" },
+    { "include": "#operator" }
+  ],
+  "repository": {
+    "comment": {
+      "match": "//.*$",
+      "name": "comment.line.double-slash.cleat"
+    },
+    "declaration": {
+      "patterns": [
+        {
+          "match": "\\b(type)\\s+([A-Za-z_][A-Za-z0-9_]*)",
+          "captures": { "1": { "name": "storage.type.cleat" }, "2": { "name": "entity.name.type.cleat" } }
+        },
+        {
+          "match": "\\b(fn)\\s+([A-Za-z_][A-Za-z0-9_]*)",
+          "captures": { "1": { "name": "storage.type.function.cleat" }, "2": { "name": "entity.name.function.cleat" } }
+        },
+        {
+          "match": "\\b(input|let)\\s+([A-Za-z_][A-Za-z0-9_]*)",
+          "captures": { "1": { "name": "storage.type.cleat" }, "2": { "name": "variable.other.declaration.cleat" } }
+        }
+      ]
+    },
+    "export": {
+      "match": "\\b(export)\\s+([a-z_][A-Za-z0-9_]*)(?=\\s*(=|after\\b))(?:\\s+(after)\\b)?",
+      "captures": {
+        "1": { "name": "keyword.control.export.cleat" },
+        "2": { "name": "entity.name.namespace.cleat" },
+        "4": { "name": "keyword.control.cleat" }
+      }
+    },
+    "keyword": {
+      "patterns": [
+        { "match": "\\b(if|then|else|match|for|in|where|export|after)\\b", "name": "keyword.control.cleat" },
+        { "match": "\\b(type|input|let|fn)\\b", "name": "storage.type.cleat" },
+        { "match": "\\bself\\b", "name": "variable.language.self.cleat" }
+      ]
+    },
+    "constant": {
+      "match": "\\b(true|false|null)\\b",
+      "name": "constant.language.cleat"
+    },
+    "type": {
+      "match": "\\b(Never|Json|Bool|Int|Float|Str|[A-Z][A-Za-z0-9_]*)\\b",
+      "name": "entity.name.type.cleat"
+    },
+    "call": {
+      "match": "\\b([a-z_][A-Za-z0-9_]*)\\s*(?=\\()",
+      "name": "entity.name.function.cleat"
+    },
+    "key": {
+      "match": "\\b([A-Za-z_][A-Za-z0-9_]*)(?=\\??\\s*:(?!:))",
+      "name": "variable.other.property.cleat"
+    },
+    "number": {
+      "match": "-?\\b[0-9][0-9_]*(\\.[0-9]+)?([eE][+-]?[0-9]+)?\\b",
+      "name": "constant.numeric.cleat"
+    },
+    "operator": {
+      "match": "\\?\\?|\\?\\.|\\.\\.\\.|\\.\\.|=>|->|==|!=|<=|>=|&&|\\|\\||[-+*/%<>!|=?]",
+      "name": "keyword.operator.cleat"
+    },
+    "string": {
+      "begin": "\"",
+      "end": "\"",
+      "name": "string.quoted.double.cleat",
+      "patterns": [
+        {
+          "begin": "\\\\\\(",
+          "end": "\\)",
+          "beginCaptures": { "0": { "name": "punctuation.section.interpolation.begin.cleat" } },
+          "endCaptures": { "0": { "name": "punctuation.section.interpolation.end.cleat" } },
+          "name": "meta.interpolation.cleat",
+          "contentName": "source.cleat",
+          "patterns": [{ "include": "$self" }]
+        },
+        { "match": "\\\\[ntr\"\\\\]", "name": "constant.character.escape.cleat" }
+      ]
+    }
+  }
+}

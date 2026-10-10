@@ -8,6 +8,7 @@ const USAGE: &str = "\
 usage:
   cleat check  <file.cleat> [--vcs]
   cleat export <file.cleat> [options]
+  cleat lsp                  language server on stdio (used by editors)
 
 export options:
   --input <file.json>      input values as a JSON object
@@ -37,6 +38,15 @@ fn main() -> ExitCode {
         eprintln!("{USAGE}");
         return ExitCode::from(2);
     };
+    if cmd == "lsp" {
+        return match cleat::lsp::run() {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(e) => {
+                eprintln!("cleat lsp: {e}");
+                ExitCode::FAILURE
+            }
+        };
+    }
     let opts = match parse_opts(&args[1..]) {
         Ok(o) => o,
         Err(e) => {

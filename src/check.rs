@@ -15,8 +15,18 @@ pub struct Outcome {
     pub errors: Vec<Diag>,
     pub warnings: Vec<Diag>,
     pub vcs: Vec<Vc>,
+    /// Hover text for identifiers, fields and keys (for the language server).
+    pub hovers: Vec<Hover>,
     /// Resolved type aliases, for the evaluator.
     pub ctx: TypeCtx,
+}
+
+#[derive(Debug, Clone)]
+pub struct Hover {
+    pub span: Span,
+    /// Length in characters of the token at `span`.
+    pub len: usize,
+    pub text: String,
 }
 
 #[derive(Clone)]
@@ -134,6 +144,38 @@ impl Checker {
                 _ => vec![a],
             },
             m => vec![m],
+        }
+    }
+
+    fn hover(&mut self, span: Span, token: &str, text: String) {
+        self.out.hovers.push(Hover { span, len: token.chars().count(), text });
+    }
+
+    fn field_sig(f: &Field) -> String {
+        let q = if f.presence == Presence::Optional { "?" } else { "" };
+        let d = match &f.presence {
+            Presence::Default(e) if !matches!(f.ty, Ty::Lit(_)) => format!(" = {e}"),
+            _ => String::new(),
+        };
+        format!("{}{q}: {}{d}", fmt_key(&f.name), f.ty)
+    }
+
+    fn fn_sig_text(name: &str, sig: &FnSig) -> String {
+        let ps: Vec<String> = sig
+            .params
+            .iter()
+            .map(|(p, t, d)| match d {
+                Some(d) => format!("{p}: {t} = {d}"),
+                None => format!("{p}: {t}"),
+            })
+            .collect();
+        format!("fn {name}({}) -> {}", ps.join(", "), sig.ret)
+    }
+
+    fn alias_text(&self, name: &str) -> String {
+        match self.ctx.aliases.get(name) {
+            Some(t) => format!("type {name} = {t}"),
+            None => format!("type {name}"),
         }
     }
 
@@ -342,7 +384,13 @@ impl Checker {
                     }
                 }
             }
-            TypeKind::Named(_) | TypeKind::Lit(_) => {}
+            TypeKind::Named(n) => {
+                if self.ctx.aliases.contains_key(n) {
+                    let text = self.alias_text(n);
+                    self.hover(te.span, n, text);
+                }
+            }
+            TypeKind::Lit(_) => {}
         }
     }
 
@@ -704,6 +752,8 @@ impl Checker {
             match m {
                 Member::Field(k, e, span) => match r.get(k) {
                     Some(f) => {
+                        let text = format!("// {shown}\n{}", Self::field_sig(f));
+                        self.hover(*span, k, text);
                         let ft = if f.presence == Presence::Optional {
                             Ty::Union(vec![f.ty.clone(), Ty::null()])
                         } else {
@@ -890,7 +940,14 @@ impl Checker {
             }
             ExprKind::Field(b, label, optional) => {
                 let bt = self.synth(b);
-                self.field_ty(&bt, b, label, *optional, e.span)
+                let t = self.field_ty(&bt, b, label, *optional, e.span);
+                let field_text = match (self.ctx.shape(&bt), label) {
+                    (Ty::Record(r), Label::Name(k)) => r.get(k).map(|f| format!("// {bt}\n{}", Self::field_sig(f))),
+                    _ => None,
+                };
+                let label_s = label.to_string();
+                self.hover(e.span, &label_s, field_text.unwrap_or_else(|| format!("{label}: {t}")));
+                t
             }
             ExprKind::Index(b, i) => self.synth_index(b, i, e.span),
             ExprKind::Call(name, args) => self.synth_call(name, args, e.span),
@@ -901,6 +958,8 @@ impl Checker {
                     self.synth(obj);
                     return Ty::Error;
                 }
+                let text = self.alias_text(tname);
+                self.hover(e.span, tname, text);
                 let t = Ty::Alias(tname.clone());
                 self.check(obj, &t);
                 t
@@ -943,8 +1002,11 @@ impl Checker {
     }
 
     fn var_ty(&mut self, n: &str, span: Span) -> Ty {
-        if let Some(t) = self.lookup(n) {
-            return t.clone();
+        if let Some(t) = self.lookup(n).cloned() {
+            if n != "self" {
+                self.hover(span, n, format!("{n}: {t}"));
+            }
+            return t;
         }
         if self.fns.contains_key(n) || BUILTINS.contains(&n) {
             self.error(span, format!("`{n}` is a function; call it with `{n}(...)`"));
@@ -1265,9 +1327,11 @@ impl Checker {
                 self.error(span, format!("`{name}` calls itself; recursion is not allowed, so evaluation always terminates"));
                 return Ty::Error;
             }
+            self.hover(span, name, Self::fn_sig_text(name, &sig));
             return self.call_user(name, &sig, args, span);
         }
         if BUILTINS.contains(&name) {
+            self.hover(span, name, format!("// built-in\n{}", crate::eval::builtin_doc(name)));
             return self.call_builtin(name, args, span);
         }
         if self.lookup(name).is_some() {
