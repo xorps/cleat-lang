@@ -384,7 +384,7 @@ fn openapi_import_checks_and_exports() {
     let Err(ExportError::Eval(es)) = export_at(src, Some(&dir), vec![("r".into(), InputValue::Raw("11".into()))]) else {
         panic!()
     };
-    assert!(es[0].msg.contains("11 does not satisfy `self >= 1 && self <= 10`"), "{}", es[0].msg);
+    assert!(es[0].msg.contains("11 does not satisfy `self <= 10`"), "{}", es[0].msg);
 }
 
 #[test]
@@ -467,4 +467,53 @@ fn crd_import() {
 fn import_errors() {
     let out = check_source_at("import x from \"missing.json\"", Some(Path::new("/nonexistent")));
     assert!(out.errors[0].msg.contains("import `x`: cannot read"), "{:?}", out.errors);
+}
+
+// ---- refining types: `with` and `refine` ----
+
+#[test]
+fn with_narrows_record_types() {
+    let base = "type T = { a?: Str, b: Int, c?: { d: [Int] }, m?: { [Str]: Str } }\n";
+    ok(&format!("{base}type U = T with {{ a: \"x\" | \"y\", b where self > 0, c.d[] where self < 10, m[] where len(self) < 5, -a }}"));
+    err(&format!("{base}type U = T with {{ b: Str }}"), "`b`: `Str` is not a subtype of `Int`; `with` can only narrow types");
+    err(&format!("{base}type U = T with {{ -b }}"), "`b`: only optional fields can be removed");
+    err(&format!("{base}type U = T with {{ bb where self > 0 }}"), "has no field `bb`; did you mean `b`?");
+    err(&format!("{base}type U = T with {{ b[] where self > 0 }}"), "cannot refine `[]` inside `Int`");
+    err(&format!("{base}type U = T with {{ b where self }}"), "refinement predicate must be `Bool`");
+    // The refined type is a subtype of the original.
+    ok(&format!("{base}type U = T with {{ b where self > 0 }}\nfn f(u: U) -> T = u"));
+    err(&format!("{base}type U = T with {{ b where self > 0 }}\nlet u: U = {{ b: 0 }}"), "refinement violated");
+    err(&format!("{base}type U = T with {{ -a }}\nlet u: U = {{ a: \"x\", b: 1 }}"), "unknown field `a`");
+}
+
+#[test]
+fn with_defaults_fill_in() {
+    let out = yaml("type T = { a?: Str, b: Int }\ntype U = T with { a: Str = \"x\" }\nexport U { b: 1 }", &[]);
+    assert_eq!(out, "b: 1\na: x\n");
+}
+
+#[test]
+fn refine_applies_to_every_reference() {
+    let dir = fixture_dir("refine", &[("api.json", SWAGGER)]);
+    let errs = |body: &str| {
+        check_source_at(&format!("import t from \"api.json\"\n{body}"), Some(&dir))
+            .errors
+            .into_iter()
+            .map(|e| e.msg)
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+    // Refining the short name refines the definition `t.web.v1.SiteSpec`, which `t.Site` uses.
+    let r = "refine t.SiteSpec with { host: \"a\" | \"b\", replicas where self <= 5 }\n";
+    assert_eq!(errs(&format!("{r}let s = t.Site {{ spec: {{ host: \"a\", replicas: 5 }} }}")), "");
+    assert!(errs(&format!("{r}let s = t.Site {{ spec: {{ host: \"c\" }} }}")).contains("expected `\"a\" | \"b\"`"));
+    assert!(errs(&format!("{r}let s = t.Site {{ spec: {{ host: \"a\", replicas: 6 }} }}")).contains("refinement violated"));
+    // Successive refinements stack.
+    let r2 = "refine t.SiteSpec with { replicas where self <= 5 }\nrefine t.SiteSpec with { replicas where self >= 2 }\n";
+    assert!(errs(&format!("{r2}let s = t.Site {{ spec: {{ host: \"a\", replicas: 1 }} }}")).contains("refinement violated"));
+    assert!(errs("refine t.Nope with { a: Str }").contains("unknown type `t.Nope`"));
+    // Runtime checks see the refinement too.
+    let src = "import t from \"api.json\"\nrefine t.SiteSpec with { replicas where self <= 5 }\ninput r: Int\nexport t.Site { spec: { host: \"a\", replicas: r } }";
+    let Err(ExportError::Eval(es)) = export_at(src, Some(&dir), vec![("r".into(), InputValue::Raw("7".into()))]) else { panic!() };
+    assert!(es[0].msg.contains("7 does not satisfy `self <= 5`"), "{}", es[0].msg);
 }

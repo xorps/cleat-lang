@@ -160,6 +160,42 @@ nested objects named after their path (`v1.CertificateSpec`). The short
 `Kind` points to the storage version. OpenAPI descriptions are shown on
 hover.
 
+### 4.2 Refining types: `with` and `refine`
+
+Imported schemas are often looser than you want: the Kubernetes OpenAPI
+spec, for instance, types `Service.spec.type` as any `Str`. `T with { ... }`
+makes a narrower copy of a record type:
+
+```ts
+type SmallDeployment = k8s.Deployment with {
+  spec.replicas where self <= 10,                                    // add a predicate
+  spec.template.spec.containers[].image where contains(self, ":"),   // `[]`: each list element / map value
+  spec.strategy.type: "RollingUpdate" | "Recreate",                  // replace the type
+  spec.revisionHistoryLimit: Int = 3,                                // replace the type and set a default
+  -status,                                                           // remove an optional field
+}
+```
+
+Paths go through nested records, optional (`T | null`) values, and named
+types. **`with` only narrows:** a replacement type must be a subtype of the
+original, and only optional fields can be removed. So the result is always
+a subtype of the original type, and a value that satisfies your refined type
+also satisfies the upstream schema. Required/optional status of a field is
+kept. On an open record, `f: T` may add a field that isn't declared.
+
+`refine T with { ... }` narrows a type **in place**: every reference to `T`
+in the file, including those inside other imported types, sees the
+narrowed version.
+
+```ts
+refine k8s.ServiceSpec with { type: "ClusterIP" | "NodePort" | "LoadBalancer" | "ExternalName" }
+let s = k8s.Service { spec.type: "Cluster" }   // error: expected one of the four
+```
+
+`refine` on a short name refines the definition it points to
+(`k8s.core.v1.ServiceSpec`). Several `refine`s of the same type stack in
+source order. Static checks and runtime checks both use the refined type.
+
 ## 5. Expressions
 
 ```ts
@@ -328,6 +364,8 @@ dependencies reach the cluster:
 - Should components be able to set an explicit wave offset, or Flux options
   like `timeout`, per component?
 - The Kubernetes OpenAPI specs (v2 and v3) don't mark enum fields such as
-  `ServiceSpec.type`; should Cleat ship a curated list for the core API?
+  `ServiceSpec.type`. `refine` (§4.2) covers this per project; should Cleat
+  also ship a curated set of refinements for the core API? That needs
+  modules that can contain `refine`.
 - Recursive types: should aliases be allowed to be recursive, so schemas
   like `JSONSchemaProps` keep their full structure instead of `Json`?

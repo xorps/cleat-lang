@@ -5,6 +5,9 @@
 
 import k8s from "../schemas/kubernetes-1.31.json"
 
+// The upstream schema allows any string here; narrow it for this project.
+refine k8s.ServiceSpec with { type: "ClusterIP" | "NodePort" | "LoadBalancer" | "ExternalName" }
+
 type Env      = "dev" | "staging" | "prod"
 type DnsLabel = Str where len(self) <= 63 && matches(self, "^[a-z0-9]([-a-z0-9]*[a-z0-9])?$")
 type Port     = Int where 1 <= self && self <= 65535

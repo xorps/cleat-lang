@@ -184,6 +184,28 @@ impl Checker {
         }
     }
 
+    /// `refine T with { ... }`: `T` becomes `T#n with { ... }`, where `T#n` is the old definition.
+    fn refine(&mut self, name: &str, patches: &[Patch], span: Span) {
+        // Refine the definition itself, so every reference sees it (`k8s.ServiceSpec` -> `k8s.core.v1.ServiceSpec`).
+        let canon = self.canonical(name);
+        let name = canon.as_str();
+        let Some(old) = self.ctx.alias_src.get(name).cloned() else {
+            let msg = self.ctx.unknown_type_message(name);
+            return self.error(span, msg);
+        };
+        let mut n = 1;
+        while self.ctx.alias_src.contains_key(&format!("{name}#{n}")) {
+            n += 1;
+        }
+        let base = format!("{name}#{n}");
+        self.ctx.alias_src.insert(base.clone(), old);
+        let te = TypeExpr {
+            kind: TypeKind::With(Box::new(TypeExpr { kind: TypeKind::Named(base), span }), patches.to_vec()),
+            span,
+        };
+        self.ctx.alias_src.insert(name.to_string(), te);
+    }
+
     /// Register an imported module's types as `ns.T`.
     fn import(&mut self, ns: &str, path: &str, span: Span) {
         let full = match &self.base {
@@ -274,6 +296,11 @@ impl Checker {
             }
         }
         for item in items {
+            if let Item::Refine { name, patches, span } = item {
+                self.refine(name, patches, *span);
+            }
+        }
+        for item in items {
             if let Item::Type { name, ty, span } = item {
                 let named = TypeExpr { kind: TypeKind::Named(name.clone()), span: *span };
                 self.ctx.resolve(&named);
@@ -286,6 +313,11 @@ impl Checker {
         for (index, item) in items.iter().enumerate() {
             match item {
                 Item::Type { .. } | Item::Import { .. } => {}
+                Item::Refine { name, .. } => {
+                    // Resolve now so patch errors are reported even if the type is unused.
+                    self.ctx.resolve(&TypeExpr { kind: TypeKind::Named(name.clone()), span: item_span(item) });
+                    self.drain_type_diags();
+                }
                 Item::Input { name, ty, default, span } => {
                     let t = self.resolve_te(ty);
                     if let Some(d) = default {
@@ -448,6 +480,31 @@ impl Checker {
                     if let Some(d) = &fd.default {
                         let ft = self.quiet_resolve(&fd.ty);
                         self.check(d, &ft);
+                    }
+                }
+            }
+            TypeKind::With(b, patches) => {
+                self.check_type_preds(b);
+                let base = self.quiet_resolve(b);
+                for p in patches {
+                    match &p.op {
+                        PatchOp::Set(t, d) => {
+                            self.check_type_preds(t);
+                            if let Some(d) = d {
+                                let ft = self.quiet_resolve(t);
+                                self.check(d, &ft);
+                            }
+                        }
+                        PatchOp::Where(pred) => {
+                            let at = self.ctx.type_at(&base, &p.path).unwrap_or(Ty::Error);
+                            self.scope.push(("self".to_string(), at));
+                            let t = self.synth(pred);
+                            self.scope.pop();
+                            if !self.sub(&t, &Ty::Bool) {
+                                self.error(pred.span, format!("refinement predicate must be `Bool`, found `{t}`"));
+                            }
+                        }
+                        PatchOp::Remove => {}
                     }
                 }
             }
@@ -1822,10 +1879,35 @@ fn qualify(te: &TypeExpr, prefix: &str, locals: &HashSet<&str>) -> TypeExpr {
         TypeKind::Tuple(ts) => TypeKind::Tuple(ts.iter().map(q).collect()),
         TypeKind::Union(ts) => TypeKind::Union(ts.iter().map(q).collect()),
         TypeKind::Refine(b, p) => TypeKind::Refine(Box::new(q(b)), p.clone()),
+        TypeKind::With(b, patches) => TypeKind::With(
+            Box::new(q(b)),
+            patches
+                .iter()
+                .map(|p| Patch {
+                    op: match &p.op {
+                        PatchOp::Set(t, d) => PatchOp::Set(q(t), d.clone()),
+                        other => other.clone(),
+                    },
+                    ..p.clone()
+                })
+                .collect(),
+        ),
         TypeKind::Record { fields, open } => TypeKind::Record {
             fields: fields.iter().map(|f| FieldDecl { ty: q(&f.ty), ..f.clone() }).collect(),
             open: *open,
         },
     };
     TypeExpr { kind, span: te.span }
+}
+
+fn item_span(item: &Item) -> Span {
+    match item {
+        Item::Type { span, .. }
+        | Item::Input { span, .. }
+        | Item::Let { span, .. }
+        | Item::Export { span, .. }
+        | Item::Import { span, .. }
+        | Item::Refine { span, .. } => *span,
+        Item::Fn(f) => f.span,
+    }
 }

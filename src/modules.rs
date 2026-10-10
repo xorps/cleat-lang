@@ -65,8 +65,8 @@ fn load_uncached(path: &Path) -> Result<Module, String> {
     for item in items {
         match item {
             Item::Type { .. } => types.push(item),
-            Item::Import { .. } => {
-                return Err(format!("`{}`: imported modules cannot import other modules yet", path.display()));
+            Item::Import { .. } | Item::Refine { .. } => {
+                return Err(format!("`{}`: imported modules cannot import or refine other modules yet", path.display()));
             }
             _ => {
                 return Err(format!("`{}`: only `type` declarations can be imported for now", path.display()));
