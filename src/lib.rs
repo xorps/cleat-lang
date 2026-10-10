@@ -62,3 +62,51 @@ pub fn export_at(
     let comps = eval::run(&items, outcome.ctx.clone(), base, inputs).map_err(ExportError::Eval)?;
     Ok((outcome, comps))
 }
+
+/// An `input` declaration, as announced to tools such as the Argo CD UI.
+#[derive(Debug, Clone)]
+pub struct InputInfo {
+    pub name: String,
+    /// The declared type, as written in messages (`Env`, `Int where self >= 1`).
+    pub ty: String,
+    /// The type's definition when the type is a name (`"dev" | "prod"` for `Env`).
+    pub definition: Option<String>,
+    /// `string`, `array` (lists and tuples) or `map` (objects).
+    pub collection: &'static str,
+    /// The default, when it can be computed without evaluating the program.
+    pub default: Option<Value>,
+    pub required: bool,
+}
+
+/// The program's inputs, or the check errors if it doesn't check.
+pub fn inputs(src: &str, base: Option<&Path>) -> Result<Vec<InputInfo>, Outcome> {
+    let items = parser::parse_program(src).map_err(|e| Outcome { errors: vec![e], ..Default::default() })?;
+    let outcome = check::check_program(&items, base);
+    if !outcome.errors.is_empty() {
+        return Err(outcome);
+    }
+    let mut ctx = outcome.ctx.clone();
+    let mut out = Vec::new();
+    for item in &items {
+        let ast::Item::Input { name, ty, default, .. } = item else { continue };
+        let t = ctx.resolve(ty);
+        let definition = match &t {
+            types::Ty::Alias(_) => Some(ctx.unfold(&t).to_string()),
+            _ => None,
+        };
+        let collection = match ctx.shape(&t) {
+            types::Ty::List(_) | types::Ty::Tuple(_) => "array",
+            types::Ty::Map(_) | types::Ty::Record(_) => "map",
+            _ => "string",
+        };
+        out.push(InputInfo {
+            name: name.clone(),
+            ty: t.to_string(),
+            definition,
+            collection,
+            default: default.as_ref().and_then(eval::eval_closed),
+            required: default.is_none(),
+        });
+    }
+    Ok(out)
+}

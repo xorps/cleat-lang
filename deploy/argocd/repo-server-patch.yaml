@@ -1,0 +1,23 @@
+# Adds the Cleat plugin sidecar to argocd-repo-server.
+#   kubectl -n argocd patch deployment argocd-repo-server --patch-file deploy/argocd/repo-server-patch.yaml
+# Replace the image with wherever you push the image built from deploy/argocd/Dockerfile.
+spec:
+  template:
+    spec:
+      containers:
+        - name: cleat
+          image: cleat-cmp:dev
+          command: [/var/run/argocd/argocd-cmp-server]
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 999
+          volumeMounts:
+            - name: var-files
+              mountPath: /var/run/argocd
+            - name: plugins
+              mountPath: /home/argocd/cmp-server/plugins
+            - name: cleat-tmp
+              mountPath: /tmp
+      volumes:
+        - name: cleat-tmp
+          emptyDir: {}

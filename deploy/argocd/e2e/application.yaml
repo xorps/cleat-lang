@@ -1,0 +1,18 @@
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata: { name: cleat-e2e, namespace: argocd }
+spec:
+  project: default
+  source:
+    repoURL: git://git-server.argocd.svc.cluster.local/app.git
+    targetRevision: main
+    path: .
+    plugin:
+      name: cleat-v1
+      parameters:
+        - { name: env, string: prod }
+        - { name: replicas, string: "2" }
+  destination: { server: https://kubernetes.default.svc, namespace: cleat-e2e }
+  syncPolicy:
+    automated: {}
+    syncOptions: [CreateNamespace=true]

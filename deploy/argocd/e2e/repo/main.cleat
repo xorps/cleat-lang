@@ -1,0 +1,36 @@
+// End-to-end test app: three components ordered with `after`,
+// which become Argo CD sync waves 0, 1 and 2.
+
+import k8s from "./kubernetes-1.31.json"
+
+refine k8s.ServiceSpec with { type: "ClusterIP" | "NodePort" | "LoadBalancer" | "ExternalName" }
+
+type Env = "dev" | "prod"
+
+input env: Env
+input replicas: Int where self >= 1 = 1
+input image: Str = "nginx:1.27-alpine"
+
+fn web(name: Str, replicas: Int) -> [k8s.Deployment | k8s.Service] = [
+  k8s.Deployment {
+    metadata: { name, labels.app: name },
+    spec: {
+      replicas,
+      selector.matchLabels.app: name,
+      template: {
+        metadata.labels.app: name,
+        spec.containers: [{ name: "web", image, ports: [{ name: "http", containerPort: 80 }] }],
+      },
+    },
+  },
+  k8s.Service {
+    metadata.name: name,
+    spec: { selector.app: name, ports: [{ name: "http", port: 80, targetPort: "http" }] },
+  },
+]
+
+export config = [k8s.ConfigMap { metadata.name: "settings", data: { ENV: env } }]
+export backend after config = web("backend", replicas)
+export frontend after backend = web("frontend", 1) with {
+  [kind: "Deployment"].metadata.labels +: { tier: "edge" },
+}

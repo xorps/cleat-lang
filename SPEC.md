@@ -399,9 +399,8 @@ dependencies reach the cluster:
 2. ~~Components with `after`; Argo CD sync waves; Flux `dependsOn`.~~ Done.
 3. ~~OpenAPI and CRD import (§4.1).~~ Done.
 4. ~~`e with { ... }` value patches with key selectors (§5.4).~~ Done.
-5. Argo CD config-management plugin: a `plugin.yaml`, and parameters
-   announced to the Argo CD UI from the `input` declarations.
-   (`--argocd-params` already reads `ARGOCD_APP_PARAMETERS`.)
+5. ~~Argo CD config management plugin: sidecar image, `plugin.yaml`, inputs
+   announced as UI parameters; tested end to end on Argo CD v3.5.~~ Done.
 6. ~~Functions, constants, imports and refines in imported modules.~~ Done.
 
 ## 11. Open questions
