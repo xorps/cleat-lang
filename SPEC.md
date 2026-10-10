@@ -1,4 +1,4 @@
-# Language Specification (draft v0.2)
+# Cleat Language Specification (draft v0.2)
 
 A typed configuration language whose values are exactly JSON. It is aimed
 at Kubernetes as a replacement for Helm and Kustomize, with TypeScript-style
@@ -16,8 +16,8 @@ revisited.
   types with the same shape are the same type.
 - **Exact by default.** An object type lists every field it allows, so
   `replcias: 3` is an error. `..` opts into extra fields.
-- **Check early, fail precisely.** `tl check` proves what it can without
-  inputs. `tl export` decodes inputs against their declared types and checks
+- **Check early, fail precisely.** `cleat check` proves what it can without
+  inputs. `cleat export` decodes inputs against their declared types and checks
   every annotated value during evaluation. An error names the source location,
   the value's path (`spec.template.spec.containers[0].ports[0]`), and the
   constraint that failed.
@@ -197,7 +197,7 @@ fn clamp(lo: Int, hi: Int where hi >= lo, x: Int) -> Int = ...
 Predicates may use any expression of the language. Every expression is pure
 and total, so predicates can always be evaluated.
 
-**Static.** `tl check` turns each place a value flows into a refined type
+**Static.** `cleat check` turns each place a value flows into a refined type
 into a verification condition (VC). VCs decided by constant folding or by
 known facts (path conditions, other refinements) are reported: a refuted VC
 is a compile error. All other VCs become runtime checks. An SMT backend may

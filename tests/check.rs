@@ -1,6 +1,6 @@
-use test_lang::targets::{self, FluxOptions};
-use test_lang::vc::VcStatus;
-use test_lang::{ExportError, InputValue, Value, check_source, emit, export};
+use cleat::targets::{self, FluxOptions};
+use cleat::vc::VcStatus;
+use cleat::{ExportError, InputValue, Value, check_source, emit, export};
 
 const PRELUDE: &str = r#"
 type Port = Int where 1 <= self && self <= 65535
@@ -14,7 +14,7 @@ fn src(s: &str) -> String {
     format!("{PRELUDE}\n{s}")
 }
 
-fn ok(s: &str) -> test_lang::Outcome {
+fn ok(s: &str) -> cleat::Outcome {
     let out = check_source(&src(s));
     let msgs: Vec<_> = out.errors.iter().map(|e| format!("{}: {}", e.span, e.msg)).collect();
     assert!(msgs.is_empty(), "expected no errors, got:\n{}", msgs.join("\n"));
@@ -45,7 +45,7 @@ fn yaml(s: &str, inputs: &[(&str, &str)]) -> String {
 
 #[test]
 fn webapp_example_checks_and_exports() {
-    let s = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/examples/webapp.tl")).unwrap();
+    let s = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/examples/webapp.cleat")).unwrap();
     let out = check_source(&s);
     assert!(out.errors.is_empty(), "{:#?}", out.errors);
     let inputs = vec![("env".into(), InputValue::Raw("prod".into())), ("image".into(), InputValue::Raw("api:1".into()))];
