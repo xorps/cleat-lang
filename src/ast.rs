@@ -469,6 +469,53 @@ pub enum TypeKind {
     Union(Vec<TypeExpr>),
     /// Predicate binder is always `self` (the parser rewrites field/param binders).
     Refine(Box<TypeExpr>, Expr),
+    /// `T with { patches }`: a narrowed copy of a record type.
+    With(Box<TypeExpr>, Vec<Patch>),
+}
+
+/// One entry of `T with { ... }`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Patch {
+    pub path: Vec<PathSeg>,
+    pub op: PatchOp,
+    pub span: Span,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum PathSeg {
+    Field(String),
+    /// `[]`: every element of a list, or every value of a map.
+    Each,
+}
+
+impl fmt::Display for PathSeg {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            PathSeg::Field(k) => write!(f, "{}", fmt_key(k)),
+            PathSeg::Each => write!(f, "[]"),
+        }
+    }
+}
+
+pub fn fmt_path(path: &[PathSeg]) -> String {
+    let mut out = String::new();
+    for (i, seg) in path.iter().enumerate() {
+        if i > 0 && matches!(seg, PathSeg::Field(_)) {
+            out.push('.');
+        }
+        out.push_str(&seg.to_string());
+    }
+    out
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum PatchOp {
+    /// `path: T` or `path: T = default`: replace the type (must be narrower).
+    Set(TypeExpr, Option<Expr>),
+    /// `path where φ`: add a predicate.
+    Where(Expr),
+    /// `-path`: remove an optional field.
+    Remove,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -508,4 +555,6 @@ pub enum Item {
     Export { name: Option<String>, after: Vec<(String, Span)>, value: Expr, span: Span },
     /// `import name from "path"`: the module's types become `name.T`.
     Import { name: String, path: String, span: Span },
+    /// `refine T with { ... }`: narrow an existing (usually imported) type in place.
+    Refine { name: String, patches: Vec<Patch>, span: Span },
 }

@@ -212,6 +212,15 @@ impl Parser {
                 self.bump();
                 Ok(Item::Import { name, path, span })
             }
+            Tok::Ident(r) if r == "refine" && matches!(self.peek_at(1), Tok::Ident(_)) => {
+                self.bump();
+                let name = self.dotted_ident()?;
+                if !self.eat(&Tok::Ident("with".into())) {
+                    return self.err("`with`");
+                }
+                let patches = self.patches()?;
+                Ok(Item::Refine { name, patches, span })
+            }
             Tok::Type => {
                 self.bump();
                 let name = self.dotted_ident()?;
@@ -279,7 +288,7 @@ impl Parser {
                 }
                 Ok(Item::Export { name, after, value: self.expr_s()?, span })
             }
-            _ => self.err("`import`, `type`, `input`, `let`, `fn` or `export`"),
+            _ => self.err("`import`, `type`, `refine`, `input`, `let`, `fn` or `export`"),
         }
     }
 
@@ -307,7 +316,64 @@ impl Parser {
         Ok(base)
     }
 
+    /// An atom, optionally followed by `with { ... }` refinements.
     fn ty_atom(&mut self) -> PResult<TypeExpr> {
+        let span = self.span();
+        let mut te = self.ty_primary()?;
+        while matches!(self.peek(), Tok::Ident(w) if w == "with") && *self.peek_at(1) == Tok::LBrace {
+            self.bump();
+            let patches = self.patches()?;
+            te = TypeExpr { kind: TypeKind::With(Box::new(te), patches), span };
+        }
+        Ok(te)
+    }
+
+    /// `{ path: T, path where φ, -path, ... }` after `with`.
+    fn patches(&mut self) -> PResult<Vec<Patch>> {
+        self.expect(&Tok::LBrace)?;
+        let mut patches = Vec::new();
+        loop {
+            if self.eat(&Tok::RBrace) {
+                break;
+            }
+            let span = self.span();
+            let remove = self.eat(&Tok::Minus);
+            let (first, _) = self.key()?;
+            let mut last = first.clone();
+            let mut path = vec![PathSeg::Field(first)];
+            loop {
+                if self.eat(&Tok::Dot) {
+                    last = self.key()?.0;
+                    path.push(PathSeg::Field(last.clone()));
+                } else if *self.peek() == Tok::LBracket && *self.peek_at(1) == Tok::RBracket {
+                    self.bump();
+                    self.bump();
+                    path.push(PathSeg::Each);
+                } else {
+                    break;
+                }
+            }
+            let op = if remove {
+                PatchOp::Remove
+            } else if self.eat(&Tok::Where) {
+                let pred = self.with_struct(false, |p| p.expr())?;
+                PatchOp::Where(pred.subst(&last, &Expr::var("self", span)))
+            } else {
+                self.expect(&Tok::Colon)?;
+                let ty = rebind(self.ty()?, &last);
+                let default = if self.eat(&Tok::Eq) { Some(self.expr_s()?) } else { None };
+                PatchOp::Set(ty, default)
+            };
+            patches.push(Patch { path, op, span });
+            if !self.eat(&Tok::Comma) {
+                self.expect(&Tok::RBrace)?;
+                break;
+            }
+        }
+        Ok(patches)
+    }
+
+    fn ty_primary(&mut self) -> PResult<TypeExpr> {
         let span = self.span();
         let kind = match self.peek().clone() {
             Tok::Ident(_) => TypeKind::Named(self.dotted_ident()?),

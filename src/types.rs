@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::fmt;
 
-use crate::ast::{BinOp, Expr, Lit, TypeExpr, TypeKind, fmt_key};
+use crate::ast::{BinOp, Expr, Lit, PatchOp, PathSeg, TypeExpr, TypeKind, fmt_key, fmt_path};
 use crate::diag::Diag;
 use crate::eval::{Value, eval_closed};
 
@@ -261,6 +261,21 @@ impl TypeCtx {
             TypeKind::Tuple(ts) => Ty::Tuple(ts.iter().map(|t| self.resolve_raw(t)).collect()),
             TypeKind::Union(ms) => Ty::Union(ms.iter().map(|m| self.resolve_raw(m)).collect()),
             TypeKind::Refine(b, p) => Ty::Refine(Box::new(self.resolve(b)), p.clone()),
+            TypeKind::With(b, patches) => {
+                let mut t = self.resolve(b);
+                for p in patches {
+                    let op = match &p.op {
+                        PatchOp::Set(te, d) => Op::Set(self.resolve(te), d.clone()),
+                        PatchOp::Where(e) => Op::Where(e.clone()),
+                        PatchOp::Remove => Op::Remove,
+                    };
+                    match self.patch(&t, &p.path, &op) {
+                        Ok(n) => t = n,
+                        Err(m) => self.diags.push(Diag::new(p.span, format!("`{}`: {m}", fmt_path(&p.path)))),
+                    }
+                }
+                t
+            }
             TypeKind::Record { fields, open } => {
                 let mut out: Vec<Field> = Vec::new();
                 for fd in fields {
@@ -329,6 +344,85 @@ impl TypeCtx {
         let t = self.resolve(&src);
         self.resolving.pop();
         self.aliases.entry(n.to_string()).or_insert(t);
+    }
+
+    /// Apply one `with` entry. Every operation narrows, so the result is a subtype of `t`.
+    fn patch(&self, t: &Ty, path: &[PathSeg], op: &Op) -> Result<Ty, String> {
+        let Some((seg, rest)) = path.split_first() else { return self.patch_here(t, op) };
+        let shown = self.norm(t);
+        match self.unfold(&shown) {
+            // Optional values: refine the non-null part.
+            Ty::Union(ms) if ms.contains(&Ty::null()) => {
+                let mut out = Vec::new();
+                for m in ms {
+                    out.push(if m == Ty::null() { m } else { self.patch(&m, path, op)? });
+                }
+                Ok(self.union(out))
+            }
+            Ty::Refine(b, p) => Ok(Ty::Refine(Box::new(self.patch(&b, path, op)?), p)),
+            Ty::List(e) if *seg == PathSeg::Each => Ok(Ty::List(Box::new(self.patch(&e, rest, op)?))),
+            Ty::Map(v) if *seg == PathSeg::Each => Ok(Ty::Map(Box::new(self.patch(&v, rest, op)?))),
+            Ty::Record(mut r) => {
+                let PathSeg::Field(k) = seg else {
+                    return Err(format!("`[]` applies to lists and maps, but `{shown}` is a record"));
+                };
+                let Some(i) = r.fields.iter().position(|f| f.name == *k) else {
+                    if r.open && rest.is_empty() {
+                        if let Op::Set(ty, d) = op {
+                            let presence = d.clone().map_or(Presence::Optional, Presence::Default);
+                            r.fields.push(Field { name: k.clone(), ty: ty.clone(), presence });
+                            return Ok(Ty::Record(r));
+                        }
+                    }
+                    let hint = crate::eval::suggest(k, r.fields.iter().map(|f| f.name.as_str()))
+                        .map(|s| format!("; did you mean `{s}`?"))
+                        .unwrap_or_default();
+                    return Err(format!("`{shown}` has no field `{k}`{hint}"));
+                };
+                if rest.is_empty() {
+                    match op {
+                        Op::Remove if r.fields[i].presence == Presence::Optional => {
+                            r.fields.remove(i);
+                        }
+                        Op::Remove => return Err("only optional fields can be removed".into()),
+                        Op::Set(_, Some(d)) => {
+                            r.fields[i].ty = self.patch_here(&r.fields[i].ty, op)?;
+                            r.fields[i].presence = Presence::Default(d.clone());
+                        }
+                        _ => r.fields[i].ty = self.patch_here(&r.fields[i].ty, op)?,
+                    }
+                } else {
+                    r.fields[i].ty = self.patch(&r.fields[i].ty, rest, op)?;
+                }
+                Ok(Ty::Record(r))
+            }
+            _ => Err(format!("cannot refine `{seg}` inside `{shown}`")),
+        }
+    }
+
+    /// Apply an operation to the type at the end of a path.
+    fn patch_here(&self, old: &Ty, op: &Op) -> Result<Ty, String> {
+        match op {
+            Op::Set(ty, _) if self.sub(ty, old, Mode::Erased) => Ok(ty.clone()),
+            Op::Set(ty, _) => Err(format!("`{ty}` is not a subtype of `{}`; `with` can only narrow types", self.norm(old))),
+            Op::Where(p) => Ok(self.norm(&Ty::Refine(Box::new(old.clone()), p.clone()))),
+            Op::Remove => Err("`-` removes a field; use it on a field path".into()),
+        }
+    }
+
+    /// The type at a `with` path (for checking `where` predicates).
+    pub fn type_at(&self, t: &Ty, path: &[PathSeg]) -> Option<Ty> {
+        let Some((seg, rest)) = path.split_first() else { return Some(t.clone()) };
+        let non_null: Vec<Ty> = match self.unfold(&self.norm(t)) {
+            Ty::Union(ms) => ms.into_iter().filter(|m| *m != Ty::null()).collect(),
+            other => vec![other],
+        };
+        let [only] = non_null.as_slice() else { return None };
+        match (self.shape(only), seg) {
+            (Ty::Record(r), PathSeg::Field(k)) => self.type_at(&r.get(k)?.ty, rest),
+            (Ty::List(e), PathSeg::Each) | (Ty::Map(e), PathSeg::Each) => self.type_at(&e, rest),
+            _ => None,
+        }
     }
 
     /// Expand an alias (repeatedly) to its definition.
@@ -507,4 +601,11 @@ impl TypeCtx {
         }
         self.union(out)
     }
+}
+
+/// A resolved `with` operation.
+enum Op {
+    Set(Ty, Option<Expr>),
+    Where(Expr),
+    Remove,
 }

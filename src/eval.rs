@@ -176,7 +176,7 @@ pub fn run(items: &[Item], ctx: TypeCtx, inputs: Vec<(String, InputValue)>) -> R
                 let after = after.iter().map(|(a, _)| a.clone()).collect();
                 comps.push(Component { name: name.clone(), after, docs });
             }
-            Item::Type { .. } | Item::Import { .. } => {}
+            Item::Type { .. } | Item::Import { .. } | Item::Refine { .. } => {}
         }
     }
     if errs.is_empty() { Ok(comps) } else { Err(errs) }
@@ -400,7 +400,14 @@ impl Evaluator {
                 let required_by = alias.map(|a| format!(" (required by `{a}`)")).unwrap_or_default();
                 match r {
                     Ok(Value::Bool(true)) => Ok(v),
-                    Ok(_) => Err(at(path, format!("{} does not satisfy `{p}`{required_by}", v.short()))),
+                    Ok(_) => {
+                        // Name the conjunct that failed, not the whole predicate.
+                        self.locals.push(("self".to_string(), v.clone()));
+                        let failed = p.conjuncts().into_iter().find(|c| self.eval(c).ok() != Some(Value::Bool(true))).cloned();
+                        self.locals.pop();
+                        let shown = failed.unwrap_or_else(|| p.clone());
+                        Err(at(path, format!("{} does not satisfy `{shown}`{required_by}", v.short())))
+                    }
                     Err(e) => Err(at(path, format!("checking `{p}` failed: {}", e.msg))),
                 }
             }

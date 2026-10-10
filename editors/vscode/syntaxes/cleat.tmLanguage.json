@@ -99,7 +99,7 @@
     "keyword": {
       "patterns": [
         {
-          "match": "\\b(import|if|then|else|match|for|in|where|export|after)\\b",
+          "match": "\\b(import|refine|with|if|then|else|match|for|in|where|export|after)\\b",
           "name": "keyword.control.cleat"
         },
         {
