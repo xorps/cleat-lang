@@ -2,8 +2,8 @@ use std::fmt;
 
 use crate::diag::Span;
 
-/// Record label. Tuples are records with positional labels `0, 1, ...`.
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+/// Field selector: `x.name` or tuple index `x.0`.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum Label {
     Pos(usize),
     Name(String),
@@ -18,13 +18,33 @@ impl fmt::Display for Label {
     }
 }
 
-/// True if the labels are exactly `0, 1, ..., n-1` in order (i.e. a tuple).
-pub fn is_positional<'a>(labels: impl Iterator<Item = &'a Label>) -> bool {
-    labels.enumerate().all(|(i, l)| *l == Label::Pos(i))
+/// A literal value; also a literal (singleton) type.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Lit {
+    Null,
+    Bool(bool),
+    Int(i64),
+    Float(f64),
+    Str(String),
 }
 
-pub fn positional<T>(items: Vec<T>) -> Vec<(Label, T)> {
-    items.into_iter().enumerate().map(|(i, x)| (Label::Pos(i), x)).collect()
+impl fmt::Display for Lit {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Lit::Null => write!(f, "null"),
+            Lit::Bool(b) => write!(f, "{b}"),
+            Lit::Int(i) => write!(f, "{i}"),
+            Lit::Float(x) => write!(f, "{x:?}"),
+            Lit::Str(s) => write!(f, "{s:?}"),
+        }
+    }
+}
+
+/// Render an object key, quoting it unless it is a plain identifier.
+pub fn fmt_key(k: &str) -> String {
+    let plain = k.chars().next().is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
+        && k.chars().all(|c| c.is_ascii_alphanumeric() || c == '_');
+    if plain { k.to_string() } else { format!("{k:?}") }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -48,6 +68,7 @@ pub enum BinOp {
     Ge,
     And,
     Or,
+    Coalesce,
 }
 
 impl BinOp {
@@ -66,16 +87,18 @@ impl BinOp {
             BinOp::Ge => ">=",
             BinOp::And => "&&",
             BinOp::Or => "||",
+            BinOp::Coalesce => "??",
         }
     }
 
     pub fn prec(self) -> u8 {
         match self {
-            BinOp::Or => 1,
-            BinOp::And => 2,
-            BinOp::Eq | BinOp::Ne | BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge => 3,
-            BinOp::Add | BinOp::Sub => 4,
-            BinOp::Mul | BinOp::Div | BinOp::Rem => 5,
+            BinOp::Coalesce => 1,
+            BinOp::Or => 2,
+            BinOp::And => 3,
+            BinOp::Eq | BinOp::Ne | BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge => 4,
+            BinOp::Add | BinOp::Sub => 5,
+            BinOp::Mul | BinOp::Div | BinOp::Rem => 6,
         }
     }
 }
@@ -94,32 +117,66 @@ impl PartialEq for Expr {
 }
 
 #[derive(Debug, Clone, PartialEq)]
+pub enum InterpPart {
+    Lit(String),
+    Expr(Expr),
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum ListItem {
+    Elem(Expr),
+    Spread(Expr),
+    If(Expr, Box<ListItem>),
+    /// `for a, b in e => item`: one variable binds list elements; two bind
+    /// (index, element) for lists and (key, value) for objects.
+    For(String, Option<String>, Expr, Box<ListItem>),
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum Member {
+    /// `key: e`. Dotted keys are desugared into nested objects by the parser.
+    Field(String, Expr, Span),
+    /// `[e]: e`
+    Computed(Expr, Expr),
+    Spread(Expr),
+    If(Expr, Vec<Member>, Option<Vec<Member>>),
+    For(String, Option<String>, Expr, Vec<Member>),
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct Arg {
+    pub name: Option<String>,
+    pub value: Expr,
+}
+
+#[derive(Debug, Clone, PartialEq)]
 pub enum ExprKind {
-    Int(i64),
-    Float(f64),
-    Str(String),
-    Bool(bool),
+    Lit(Lit),
+    Interp(Vec<InterpPart>),
     Var(String),
-    /// Record literal; tuples use positional labels.
-    Record(Vec<(Label, Expr)>),
-    Field(Box<Expr>, Label),
-    Call(Box<Expr>, Vec<Expr>),
-    /// `E.V`, `E.V(..)`, `E.V { .. }`. The payload, if any, is a `Record` expression.
-    Variant {
-        enum_name: String,
-        variant: String,
-        payload: Option<Box<Expr>>,
-    },
+    List(Vec<ListItem>),
+    Tuple(Vec<Expr>),
+    Object(Vec<Member>),
+    /// `e.f` or, when the flag is set, `e?.f`.
+    Field(Box<Expr>, Label, bool),
+    Index(Box<Expr>, Box<Expr>),
+    Call(String, Vec<Arg>),
+    /// `T { ... }`
+    Typed(String, Box<Expr>),
     Unary(UnOp, Box<Expr>),
     Binary(BinOp, Box<Expr>, Box<Expr>),
-    If(Box<Expr>, Box<Expr>, Option<Box<Expr>>),
+    If(Box<Expr>, Box<Expr>, Box<Expr>),
+    Let(String, Option<Box<TypeExpr>>, Box<Expr>, Box<Expr>),
     Match(Box<Expr>, Vec<Arm>),
-    Block(Vec<Stmt>, Option<Box<Expr>>),
 }
 
 impl Expr {
     pub fn new(kind: ExprKind, span: Span) -> Self {
         Expr { kind, span }
+    }
+
+    pub fn lit(l: Lit, span: Span) -> Self {
+        Expr::new(ExprKind::Lit(l), span)
     }
 
     pub fn var(name: &str, span: Span) -> Self {
@@ -128,7 +185,7 @@ impl Expr {
 
     pub fn field(base: Expr, label: Label) -> Self {
         let span = base.span;
-        Expr::new(ExprKind::Field(Box::new(base), label), span)
+        Expr::new(ExprKind::Field(Box::new(base), label, false), span)
     }
 
     pub fn binary(op: BinOp, l: Expr, r: Expr) -> Self {
@@ -159,18 +216,14 @@ impl Expr {
         Expr::new(ExprKind::Unary(UnOp::Not, Box::new(self.clone())), self.span)
     }
 
-    pub fn is_blocklike(&self) -> bool {
-        matches!(self.kind, ExprKind::If(..) | ExprKind::Match(..) | ExprKind::Block(..))
-    }
-
-    /// Side-effect-free and expressible in the refinement logic.
+    /// Simple enough to record as a fact about the program state.
     pub fn is_pure(&self) -> bool {
         match &self.kind {
-            ExprKind::Int(_) | ExprKind::Float(_) | ExprKind::Str(_) | ExprKind::Bool(_) | ExprKind::Var(_) => true,
-            ExprKind::Field(b, _) => b.is_pure(),
+            ExprKind::Lit(_) | ExprKind::Var(_) => true,
+            ExprKind::Field(b, _, _) => b.is_pure(),
             ExprKind::Unary(_, x) => x.is_pure(),
             ExprKind::Binary(_, l, r) => l.is_pure() && r.is_pure(),
-            ExprKind::Record(fs) => fs.iter().all(|(_, e)| e.is_pure()),
+            ExprKind::Call(_, args) => args.iter().all(|a| a.value.is_pure()),
             _ => false,
         }
     }
@@ -190,10 +243,16 @@ impl Expr {
         self.subst_many(&[(name.to_string(), with.clone())])
     }
 
-    /// Simultaneous substitution of variables. Predicates contain no binders,
-    /// so capture is not a concern.
+    /// Simultaneous substitution of free variables. Used on predicates, which
+    /// may contain binders (`let`, `for`, `match`); bound names are respected.
     pub fn subst_many(&self, map: &[(String, Expr)]) -> Expr {
-        let go = |e: &Expr| Box::new(e.subst_many(map));
+        if map.is_empty() {
+            return self.clone();
+        }
+        let without = |names: &[&str]| -> Vec<(String, Expr)> {
+            map.iter().filter(|(n, _)| !names.contains(&n.as_str())).cloned().collect()
+        };
+        let go = |e: &Expr| e.subst_many(map);
         let kind = match &self.kind {
             ExprKind::Var(n) => {
                 if let Some((_, e)) = map.iter().find(|(m, _)| m == n) {
@@ -201,60 +260,96 @@ impl Expr {
                 }
                 ExprKind::Var(n.clone())
             }
-            ExprKind::Record(fs) => ExprKind::Record(fs.iter().map(|(l, e)| (l.clone(), e.subst_many(map))).collect()),
-            ExprKind::Field(b, l) => ExprKind::Field(go(b), l.clone()),
-            ExprKind::Call(f, args) => ExprKind::Call(go(f), args.iter().map(|a| a.subst_many(map)).collect()),
-            ExprKind::Variant { enum_name, variant, payload } => ExprKind::Variant {
-                enum_name: enum_name.clone(),
-                variant: variant.clone(),
-                payload: payload.as_ref().map(|p| go(p)),
-            },
-            ExprKind::Unary(op, x) => ExprKind::Unary(*op, go(x)),
-            ExprKind::Binary(op, l, r) => ExprKind::Binary(*op, go(l), go(r)),
-            ExprKind::If(c, t, e) => ExprKind::If(go(c), go(t), e.as_ref().map(|e| go(e))),
-            // Match/Block never occur inside predicates; leave them alone.
-            other => other.clone(),
+            ExprKind::Lit(l) => ExprKind::Lit(l.clone()),
+            ExprKind::Interp(ps) => ExprKind::Interp(
+                ps.iter()
+                    .map(|p| match p {
+                        InterpPart::Lit(s) => InterpPart::Lit(s.clone()),
+                        InterpPart::Expr(e) => InterpPart::Expr(go(e)),
+                    })
+                    .collect(),
+            ),
+            ExprKind::List(items) => ExprKind::List(items.iter().map(|i| subst_item(i, map)).collect()),
+            ExprKind::Tuple(es) => ExprKind::Tuple(es.iter().map(go).collect()),
+            ExprKind::Object(ms) => ExprKind::Object(subst_members(ms, map)),
+            ExprKind::Field(b, l, q) => ExprKind::Field(Box::new(go(b)), l.clone(), *q),
+            ExprKind::Index(b, i) => ExprKind::Index(Box::new(go(b)), Box::new(go(i))),
+            ExprKind::Call(f, args) => ExprKind::Call(
+                f.clone(),
+                args.iter().map(|a| Arg { name: a.name.clone(), value: go(&a.value) }).collect(),
+            ),
+            ExprKind::Typed(t, e) => ExprKind::Typed(t.clone(), Box::new(go(e))),
+            ExprKind::Unary(op, x) => ExprKind::Unary(*op, Box::new(go(x))),
+            ExprKind::Binary(op, l, r) => ExprKind::Binary(*op, Box::new(go(l)), Box::new(go(r))),
+            ExprKind::If(c, t, e) => ExprKind::If(Box::new(go(c)), Box::new(go(t)), Box::new(go(e))),
+            ExprKind::Let(n, t, v, b) => {
+                ExprKind::Let(n.clone(), t.clone(), Box::new(go(v)), Box::new(b.subst_many(&without(&[n]))))
+            }
+            ExprKind::Match(s, arms) => ExprKind::Match(
+                Box::new(go(s)),
+                arms.iter()
+                    .map(|a| {
+                        let bound = a.pat.binders();
+                        let names: Vec<&str> = bound.iter().map(String::as_str).collect();
+                        Arm { pat: a.pat.clone(), body: a.body.subst_many(&without(&names)) }
+                    })
+                    .collect(),
+            ),
         };
         Expr::new(kind, self.span)
     }
 
     fn fmt_prec(&self, f: &mut fmt::Formatter<'_>, prec: u8) -> fmt::Result {
         match &self.kind {
-            ExprKind::Int(i) => write!(f, "{i}"),
-            ExprKind::Float(x) => write!(f, "{x:?}"),
-            ExprKind::Str(s) => write!(f, "{s:?}"),
-            ExprKind::Bool(b) => write!(f, "{b}"),
-            ExprKind::Var(n) => write!(f, "{n}"),
-            ExprKind::Record(fs) => fmt_record_expr(f, fs),
-            ExprKind::Field(b, l) => {
-                b.fmt_prec(f, 7)?;
-                write!(f, ".{l}")
+            ExprKind::Lit(l) => write!(f, "{l}"),
+            ExprKind::Interp(ps) => {
+                write!(f, "\"")?;
+                for p in ps {
+                    match p {
+                        InterpPart::Lit(s) => write!(f, "{}", s.escape_debug())?,
+                        InterpPart::Expr(e) => write!(f, "\\({e})")?,
+                    }
+                }
+                write!(f, "\"")
             }
-            ExprKind::Call(func, args) => {
-                func.fmt_prec(f, 7)?;
+            ExprKind::Var(n) => write!(f, "{n}"),
+            ExprKind::List(items) => write!(f, "[{}]", if items.is_empty() { "" } else { "..." }),
+            ExprKind::Tuple(es) => {
                 write!(f, "(")?;
+                for (i, e) in es.iter().enumerate() {
+                    if i > 0 {
+                        write!(f, ", ")?;
+                    }
+                    e.fmt_prec(f, 0)?;
+                }
+                write!(f, ")")
+            }
+            ExprKind::Object(ms) => write!(f, "{}", if ms.is_empty() { "{}" } else { "{ ... }" }),
+            ExprKind::Field(b, l, q) => {
+                b.fmt_prec(f, 9)?;
+                write!(f, "{}{}", if *q { "?." } else { "." }, l)
+            }
+            ExprKind::Index(b, i) => {
+                b.fmt_prec(f, 9)?;
+                write!(f, "[{i}]")
+            }
+            ExprKind::Call(name, args) => {
+                write!(f, "{name}(")?;
                 for (i, a) in args.iter().enumerate() {
                     if i > 0 {
                         write!(f, ", ")?;
                     }
-                    a.fmt_prec(f, 0)?;
+                    if let Some(n) = &a.name {
+                        write!(f, "{n}: ")?;
+                    }
+                    a.value.fmt_prec(f, 0)?;
                 }
                 write!(f, ")")
             }
-            ExprKind::Variant { enum_name, variant, payload } => {
-                write!(f, "{enum_name}.{variant}")?;
-                match payload.as_deref() {
-                    Some(Expr { kind: ExprKind::Record(fs), .. }) if !is_positional(fs.iter().map(|(l, _)| l)) => {
-                        write!(f, " ")?;
-                        fmt_record_expr(f, fs)
-                    }
-                    Some(p) => p.fmt_prec(f, 0),
-                    None => Ok(()),
-                }
-            }
+            ExprKind::Typed(t, e) => write!(f, "{t} {e}"),
             ExprKind::Unary(op, x) => {
                 write!(f, "{}", if *op == UnOp::Neg { "-" } else { "!" })?;
-                x.fmt_prec(f, 6)
+                x.fmt_prec(f, 8)
             }
             ExprKind::Binary(op, l, r) => {
                 let p = op.prec();
@@ -269,48 +364,57 @@ impl Expr {
                 }
                 Ok(())
             }
-            ExprKind::If(..) => write!(f, "<if>"),
-            ExprKind::Match(..) => write!(f, "<match>"),
-            ExprKind::Block(..) => write!(f, "<block>"),
+            ExprKind::If(c, t, e) => {
+                if prec > 0 {
+                    write!(f, "(")?;
+                }
+                write!(f, "if {c} then {t} else {e}")?;
+                if prec > 0 {
+                    write!(f, ")")?;
+                }
+                Ok(())
+            }
+            ExprKind::Let(n, _, v, b) => write!(f, "(let {n} = {v}; {b})"),
+            ExprKind::Match(s, _) => write!(f, "match {s} {{ ... }}"),
         }
     }
 }
 
-fn fmt_record_expr(f: &mut fmt::Formatter<'_>, fs: &[(Label, Expr)]) -> fmt::Result {
-    if is_positional(fs.iter().map(|(l, _)| l)) {
-        write!(f, "(")?;
-        for (i, (_, e)) in fs.iter().enumerate() {
-            if i > 0 {
-                write!(f, ", ")?;
+fn subst_item(item: &ListItem, map: &[(String, Expr)]) -> ListItem {
+    match item {
+        ListItem::Elem(e) => ListItem::Elem(e.subst_many(map)),
+        ListItem::Spread(e) => ListItem::Spread(e.subst_many(map)),
+        ListItem::If(c, i) => ListItem::If(c.subst_many(map), Box::new(subst_item(i, map))),
+        ListItem::For(a, b, e, i) => {
+            let inner: Vec<(String, Expr)> =
+                map.iter().filter(|(n, _)| n != a && Some(n) != b.as_ref()).cloned().collect();
+            ListItem::For(a.clone(), b.clone(), e.subst_many(map), Box::new(subst_item(i, &inner)))
+        }
+    }
+}
+
+fn subst_members(ms: &[Member], map: &[(String, Expr)]) -> Vec<Member> {
+    ms.iter()
+        .map(|m| match m {
+            Member::Field(k, e, s) => Member::Field(k.clone(), e.subst_many(map), *s),
+            Member::Computed(k, v) => Member::Computed(k.subst_many(map), v.subst_many(map)),
+            Member::Spread(e) => Member::Spread(e.subst_many(map)),
+            Member::If(c, t, e) => {
+                Member::If(c.subst_many(map), subst_members(t, map), e.as_ref().map(|e| subst_members(e, map)))
             }
-            e.fmt_prec(f, 0)?;
-        }
-        if fs.len() == 1 {
-            write!(f, ",")?;
-        }
-        return write!(f, ")");
-    }
-    write!(f, "{{ ")?;
-    for (i, (l, e)) in fs.iter().enumerate() {
-        if i > 0 {
-            write!(f, ", ")?;
-        }
-        write!(f, "{l}: ")?;
-        e.fmt_prec(f, 0)?;
-    }
-    write!(f, " }}")
+            Member::For(a, b, e, body) => {
+                let inner: Vec<(String, Expr)> =
+                    map.iter().filter(|(n, _)| n != a && Some(n) != b.as_ref()).cloned().collect();
+                Member::For(a.clone(), b.clone(), e.subst_many(map), subst_members(body, &inner))
+            }
+        })
+        .collect()
 }
 
 impl fmt::Display for Expr {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         self.fmt_prec(f, 0)
     }
-}
-
-#[derive(Debug, Clone, PartialEq)]
-pub enum Stmt {
-    Let { name: String, ty: Option<TypeExpr>, value: Expr, span: Span },
-    Expr(Expr),
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -329,12 +433,23 @@ pub struct Pat {
 pub enum PatKind {
     Wild,
     Bind(String),
-    /// `x: T` or `_: T` — a runtime type test.
+    /// `x: T` or `_: T`: a runtime type test.
     Typed(Option<String>, TypeExpr),
-    Lit(Expr),
-    /// `E.V`, `E.V(p, ..)`, `E.V { f: p, .. }`; the bool is "open" (`..`).
-    Variant { enum_name: String, variant: String, payload: Option<(Vec<(Label, Pat)>, bool)> },
-    Record(Vec<(Label, Pat)>, bool),
+    Lit(Lit),
+    Tuple(Vec<Pat>),
+    /// `{ k: p, .. }`; the flag is "open".
+    Record(Vec<(String, Pat)>, bool),
+}
+
+impl Pat {
+    pub fn binders(&self) -> Vec<String> {
+        match &self.kind {
+            PatKind::Wild | PatKind::Lit(_) | PatKind::Typed(None, _) => vec![],
+            PatKind::Bind(n) | PatKind::Typed(Some(n), _) => vec![n.clone()],
+            PatKind::Tuple(ps) => ps.iter().flat_map(Pat::binders).collect(),
+            PatKind::Record(fs, _) => fs.iter().flat_map(|(_, p)| p.binders()).collect(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -346,35 +461,49 @@ pub struct TypeExpr {
 #[derive(Debug, Clone, PartialEq)]
 pub enum TypeKind {
     Named(String),
-    Path(String, String),
-    Record { fields: Vec<(Label, TypeExpr)>, open: bool },
+    Lit(Lit),
+    List(Box<TypeExpr>),
+    Tuple(Vec<TypeExpr>),
+    Map(Box<TypeExpr>),
+    Record { fields: Vec<FieldDecl>, open: bool },
     Union(Vec<TypeExpr>),
     /// Predicate binder is always `self` (the parser rewrites field/param binders).
     Refine(Box<TypeExpr>, Expr),
-    Fn(Vec<TypeExpr>, Box<TypeExpr>),
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct FieldDecl {
+    pub name: String,
+    pub ty: TypeExpr,
+    pub optional: bool,
+    pub default: Option<Expr>,
+    pub span: Span,
 }
 
 #[derive(Debug, Clone)]
-pub struct VariantDecl {
+pub struct Param {
     pub name: String,
-    /// A record type expression (positional for tuple variants); `None` for unit variants.
-    pub payload: Option<TypeExpr>,
+    pub ty: TypeExpr,
+    pub default: Option<Expr>,
     pub span: Span,
 }
 
 #[derive(Debug, Clone)]
 pub struct FnDecl {
     pub name: String,
-    pub params: Vec<(String, TypeExpr, Span)>,
+    pub params: Vec<Param>,
     pub ret: Option<TypeExpr>,
     pub body: Expr,
     pub span: Span,
 }
 
 #[derive(Debug, Clone)]
-pub enum Decl {
+pub enum Item {
     Type { name: String, ty: TypeExpr, span: Span },
-    Nominal { name: String, ty: TypeExpr, span: Span },
-    Enum { name: String, variants: Vec<VariantDecl>, span: Span },
+    Input { name: String, ty: TypeExpr, default: Option<Expr>, span: Span },
+    Let { name: String, ty: Option<TypeExpr>, value: Expr, span: Span },
     Fn(FnDecl),
+    /// `export e` or `export name (after a, b)? = e`. Named exports are
+    /// components; `after` orders them (Argo sync waves, Flux `dependsOn`).
+    Export { name: Option<String>, after: Vec<(String, Span)>, value: Expr, span: Span },
 }

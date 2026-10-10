@@ -1,29 +1,43 @@
 # test-lang
 
-A small language with nominal types, tuples, `Never`, anonymous records,
-untagged unions, disjoint unions (enums) and refinement types.
-See [SPEC.md](SPEC.md) for the design.
-
-## Prototype
+A typed configuration language whose values are exactly JSON, aimed at
+replacing Helm and Kustomize for Kubernetes. It has structural,
+TypeScript-style types (literal unions, optional fields, defaults,
+refinements), typed inputs, and errors that name the exact field and
+constraint that failed. See [SPEC.md](SPEC.md).
 
 ```sh
-cargo run -- check examples/tour.tl --vcs   # type-check and list verification conditions
+cargo build
+./target/debug/tl check examples/webapp.tl
+./target/debug/tl export examples/webapp.tl --set env=prod --set image=ghcr.io/acme/api:1.4.2
+./target/debug/tl export examples/webapp.tl --set env=prod --set image=api:1 --target argocd
+./target/debug/tl export examples/webapp.tl --set env=prod --set image=api:1 \
+    --target flux --out deploy --flux-source infra --flux-path deploy
 cargo test
 ```
 
-The prototype implements parsing, base type checking with subtyping and
-union normalization, narrowing and exhaustiveness for `match`, and
-verification-condition generation for refinements. VCs are discharged only
-by constant folding and syntactic matching; the rest are reported as
-`pending` until the SMT backend lands.
+## What fails, and when
+
+| Mistake | Caught by | Message |
+|---|---|---|
+| `metdata:` typo | `tl check` | ``unknown field `metdata` in `Svc`; did you mean `metadata`?`` |
+| `port: 70000` literal | `tl check` | ``refinement violated: `1 <= 70000 && 70000 <= 65535` is false (required by `Port`)`` |
+| optional field used without a check | `tl check` | `` `m.labels` may be null; use `?.` or `??` `` |
+| `--set env=production` | `tl export` | ``input `env`: expected `Env` (`"dev" \| "staging" \| "prod"`), got "production"`` |
+| computed port out of range | `tl export` | ``argument `port` of `container`: 70080 does not satisfy …``, followed by the call stack |
+| component dependency cycle | `tl check` | `dependency cycle between components: a -> b -> a` |
+
+## Layout
 
 | Module | Role |
 |---|---|
-| `src/lexer.rs`, `src/parser.rs` | Surface syntax → AST |
-| `src/types.rs` | `Ty`, normalization (§4), subtyping (§3), narrowing |
-| `src/check.rs` | Bidirectional checker, patterns, VC generation (§5–6) |
-| `src/vc.rs` | VC representation and trivial discharge |
+| `src/lexer.rs`, `src/parser.rs` | Source to AST (dotted keys, comprehensions, interpolation) |
+| `src/types.rs` | Types, normalization, subtyping, narrowing |
+| `src/check.rs` | Static checker: bidirectional, field-aware diagnostics, VCs |
+| `src/vc.rs` | Refinement obligations: proved, refuted, or left to runtime |
+| `src/eval.rs` | Evaluator, input decoding, runtime type checks with defaults |
+| `src/emit.rs`, `src/json.rs` | YAML/JSON output with safe quoting; JSON input parsing |
+| `src/targets.rs` | `plain`, `argocd` (sync waves), `flux` (`dependsOn`) |
 
-Not yet implemented: SMT (Z3) backend, generics, measures, mutable fields,
-modules, `--gradual`, code generation. Variable shadowing is rejected for now
-because refinement facts refer to variables by name.
+Next up: Kubernetes OpenAPI import, so `Deployment`, `Service` and CRDs come
+with real types instead of hand-written ones.

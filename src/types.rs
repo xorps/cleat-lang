@@ -1,26 +1,73 @@
-use std::collections::{BTreeMap, HashMap};
+use std::collections::HashMap;
 use std::fmt;
 
-use crate::ast::{BinOp, Expr, ExprKind, Label, UnOp, is_positional};
+use crate::ast::{BinOp, Expr, Lit, TypeExpr, TypeKind, fmt_key};
+use crate::diag::Diag;
+use crate::eval::{Value, eval_closed};
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum Presence {
+    Required,
+    /// `f?: T`: may be absent; reads as `T | null`.
+    Optional,
+    /// `f: T = e` (or a single-literal type): filled in when absent.
+    Default(Expr),
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct Field {
+    pub name: String,
+    pub ty: Ty,
+    pub presence: Presence,
+}
+
+impl Field {
+    /// Guaranteed to be present on a value that has been checked against the record.
+    pub fn present(&self) -> bool {
+        !matches!(self.presence, Presence::Optional)
+    }
+
+    /// The type of reading `x.f`.
+    pub fn read_ty(&self) -> Ty {
+        match self.presence {
+            Presence::Optional => Ty::Union(vec![self.ty.clone(), Ty::null()]),
+            _ => self.ty.clone(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct Rec {
+    pub fields: Vec<Field>,
+    pub open: bool,
+}
+
+impl Rec {
+    pub fn get(&self, name: &str) -> Option<&Field> {
+        self.fields.iter().find(|f| f.name == name)
+    }
+}
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Ty {
     /// Produced after a reported error; compatible with everything to avoid cascades.
     Error,
     Never,
+    Json,
+    Bool,
     Int,
     Float,
-    Bool,
     Str,
-    Nominal(String),
-    Enum(String),
-    Variant(String, String),
-    /// Tuples are records with positional labels.
-    Record { fields: BTreeMap<Label, Ty>, open: bool },
+    Lit(Lit),
+    List(Box<Ty>),
+    Tuple(Vec<Ty>),
+    Map(Box<Ty>),
+    Record(Rec),
     Union(Vec<Ty>),
     /// Predicate over `self`.
     Refine(Box<Ty>, Expr),
-    Fn(Vec<Ty>, Box<Ty>),
+    /// A named type alias, unfolded on demand (keeps names in messages).
+    Alias(String),
 }
 
 /// `Erased` ignores refinement predicates (base typing; predicates become VCs).
@@ -33,12 +80,8 @@ pub enum Mode {
 }
 
 impl Ty {
-    pub fn unit() -> Ty {
-        Ty::Record { fields: BTreeMap::new(), open: false }
-    }
-
-    pub fn tuple(items: Vec<Ty>) -> Ty {
-        Ty::Record { fields: items.into_iter().enumerate().map(|(i, t)| (Label::Pos(i), t)).collect(), open: false }
+    pub fn null() -> Ty {
+        Ty::Lit(Lit::Null)
     }
 
     /// The type with outer refinements removed.
@@ -49,68 +92,92 @@ impl Ty {
         }
     }
 
-    pub fn contains_fn(&self) -> bool {
-        match self {
-            Ty::Fn(..) => true,
-            Ty::Record { fields, .. } => fields.values().any(Ty::contains_fn),
-            Ty::Union(ms) => ms.iter().any(Ty::contains_fn),
-            Ty::Refine(b, _) => b.contains_fn(),
-            _ => false,
-        }
+    fn json_members() -> Vec<Ty> {
+        vec![
+            Ty::null(),
+            Ty::Lit(Lit::Bool(true)),
+            Ty::Lit(Lit::Bool(false)),
+            Ty::Float,
+            Ty::Str,
+            Ty::List(Box::new(Ty::Json)),
+            Ty::Map(Box::new(Ty::Json)),
+        ]
     }
 
-    /// Substitute variables in every predicate (used to instantiate dependent signatures).
     pub fn subst_many(&self, map: &[(String, Expr)]) -> Ty {
+        let go = |t: &Ty| t.subst_many(map);
         match self {
-            Ty::Refine(b, p) => Ty::Refine(Box::new(b.subst_many(map)), p.subst_many(map)),
-            Ty::Record { fields, open } => Ty::Record {
-                fields: fields.iter().map(|(l, t)| (l.clone(), t.subst_many(map))).collect(),
-                open: *open,
-            },
-            Ty::Union(ms) => Ty::Union(ms.iter().map(|m| m.subst_many(map)).collect()),
-            Ty::Fn(ps, r) => Ty::Fn(ps.iter().map(|p| p.subst_many(map)).collect(), Box::new(r.subst_many(map))),
+            Ty::Refine(b, p) => Ty::Refine(Box::new(go(b)), p.subst_many(map)),
+            Ty::Record(r) => Ty::Record(Rec {
+                fields: r.fields.iter().map(|f| Field { ty: go(&f.ty), ..f.clone() }).collect(),
+                open: r.open,
+            }),
+            Ty::List(t) => Ty::List(Box::new(go(t))),
+            Ty::Map(t) => Ty::Map(Box::new(go(t))),
+            Ty::Tuple(ts) => Ty::Tuple(ts.iter().map(go).collect()),
+            Ty::Union(ms) => Ty::Union(ms.iter().map(go).collect()),
             t => t.clone(),
         }
     }
 
     fn fmt_nested(&self, f: &mut fmt::Formatter<'_>, nested: bool) -> fmt::Result {
-        let paren = nested && matches!(self, Ty::Union(_) | Ty::Refine(..) | Ty::Fn(..));
+        let paren = nested && matches!(self, Ty::Union(_) | Ty::Refine(..));
         if paren {
             write!(f, "(")?;
         }
         match self {
             Ty::Error => write!(f, "<error>")?,
             Ty::Never => write!(f, "Never")?,
+            Ty::Json => write!(f, "Json")?,
+            Ty::Bool => write!(f, "Bool")?,
             Ty::Int => write!(f, "Int")?,
             Ty::Float => write!(f, "Float")?,
-            Ty::Bool => write!(f, "Bool")?,
             Ty::Str => write!(f, "Str")?,
-            Ty::Nominal(n) | Ty::Enum(n) => write!(f, "{n}")?,
-            Ty::Variant(e, v) => write!(f, "{e}.{v}")?,
-            Ty::Record { fields, open } => {
-                if !open && is_positional(fields.keys()) {
-                    write!(f, "(")?;
-                    for (i, t) in fields.values().enumerate() {
-                        if i > 0 {
-                            write!(f, ", ")?;
-                        }
-                        t.fmt_nested(f, false)?;
+            Ty::Lit(l) => write!(f, "{l}")?,
+            Ty::Alias(n) => write!(f, "{n}")?,
+            Ty::List(t) => {
+                write!(f, "[")?;
+                t.fmt_nested(f, false)?;
+                write!(f, "]")?;
+            }
+            Ty::Map(t) => {
+                write!(f, "{{ [Str]: ")?;
+                t.fmt_nested(f, false)?;
+                write!(f, " }}")?;
+            }
+            Ty::Tuple(ts) => {
+                write!(f, "(")?;
+                for (i, t) in ts.iter().enumerate() {
+                    if i > 0 {
+                        write!(f, ", ")?;
                     }
-                    if fields.len() == 1 {
-                        write!(f, ",")?;
-                    }
-                    write!(f, ")")?;
+                    t.fmt_nested(f, false)?;
+                }
+                if ts.len() == 1 {
+                    write!(f, ",")?;
+                }
+                write!(f, ")")?;
+            }
+            Ty::Record(r) => {
+                if r.fields.is_empty() && !r.open {
+                    write!(f, "{{}}")?;
                 } else {
                     write!(f, "{{ ")?;
-                    for (i, (l, t)) in fields.iter().enumerate() {
+                    for (i, fl) in r.fields.iter().enumerate() {
                         if i > 0 {
                             write!(f, ", ")?;
                         }
-                        write!(f, "{l}: ")?;
-                        t.fmt_nested(f, false)?;
+                        let q = if fl.presence == Presence::Optional { "?" } else { "" };
+                        write!(f, "{}{q}: ", fmt_key(&fl.name))?;
+                        fl.ty.fmt_nested(f, false)?;
+                        if let Presence::Default(e) = &fl.presence {
+                            if !matches!(fl.ty, Ty::Lit(_)) {
+                                write!(f, " = {e}")?;
+                            }
+                        }
                     }
-                    if *open {
-                        write!(f, "{}..", if fields.is_empty() { "" } else { ", " })?;
+                    if r.open {
+                        write!(f, "{}..", if r.fields.is_empty() { "" } else { ", " })?;
                     }
                     write!(f, " }}")?;
                 }
@@ -127,17 +194,6 @@ impl Ty {
                 b.fmt_nested(f, true)?;
                 write!(f, " where {p}")?;
             }
-            Ty::Fn(ps, r) => {
-                write!(f, "fn(")?;
-                for (i, p) in ps.iter().enumerate() {
-                    if i > 0 {
-                        write!(f, ", ")?;
-                    }
-                    p.fmt_nested(f, false)?;
-                }
-                write!(f, ") -> ")?;
-                r.fmt_nested(f, false)?;
-            }
         }
         if paren {
             write!(f, ")")?;
@@ -152,38 +208,128 @@ impl fmt::Display for Ty {
     }
 }
 
-/// Every conjunct of `q` appears in `p`. A syntactic stand-in for SMT.
+/// Every conjunct of `q` appears in `p`. A syntactic stand-in for a solver.
 pub fn implies(p: &Expr, q: &Expr) -> bool {
     let ps = p.conjuncts();
     q.conjuncts().iter().all(|c| ps.contains(c))
 }
 
-/// Declarations the type algebra needs: enum variants and nominal underlyings.
-#[derive(Default)]
+/// Type aliases and the type algebra over them.
+#[derive(Debug, Default, Clone)]
 pub struct TypeCtx {
-    /// Enum name -> variants in declaration order, each with its payload record type.
-    pub enums: HashMap<String, Vec<(String, Ty)>>,
-    pub nominals: HashMap<String, Ty>,
+    pub alias_src: HashMap<String, TypeExpr>,
+    pub aliases: HashMap<String, Ty>,
+    resolving: Vec<String>,
+    /// Diagnostics from resolution; the checker drains these.
+    pub diags: Vec<Diag>,
 }
 
+pub const BUILTIN_TYPES: [&str; 6] = ["Never", "Json", "Bool", "Int", "Float", "Str"];
+
 impl TypeCtx {
-    pub fn variants(&self, e: &str) -> Vec<Ty> {
-        self.enums
-            .get(e)
-            .map(|vs| vs.iter().map(|(v, _)| Ty::Variant(e.to_string(), v.clone())).collect())
-            .unwrap_or_default()
+    // ---------- resolution ----------
+
+    pub fn resolve(&mut self, te: &TypeExpr) -> Ty {
+        let t = self.resolve_raw(te);
+        self.norm(&t)
     }
 
-    pub fn payload(&self, e: &str, v: &str) -> Option<&Ty> {
-        self.enums.get(e)?.iter().find(|(n, _)| n == v).map(|(_, t)| t)
+    fn resolve_raw(&mut self, te: &TypeExpr) -> Ty {
+        match &te.kind {
+            TypeKind::Named(n) => match n.as_str() {
+                "Never" => Ty::Never,
+                "Json" => Ty::Json,
+                "Bool" => Ty::Bool,
+                "Int" => Ty::Int,
+                "Float" => Ty::Float,
+                "Str" => Ty::Str,
+                _ if self.alias_src.contains_key(n) => {
+                    self.resolve_alias(n, te);
+                    Ty::Alias(n.clone())
+                }
+                _ => {
+                    self.diags.push(Diag::new(te.span, format!("unknown type `{n}`")));
+                    Ty::Error
+                }
+            },
+            TypeKind::Lit(l) => Ty::Lit(l.clone()),
+            TypeKind::List(t) => Ty::List(Box::new(self.resolve_raw(t))),
+            TypeKind::Map(t) => Ty::Map(Box::new(self.resolve_raw(t))),
+            TypeKind::Tuple(ts) => Ty::Tuple(ts.iter().map(|t| self.resolve_raw(t)).collect()),
+            TypeKind::Union(ms) => Ty::Union(ms.iter().map(|m| self.resolve_raw(m)).collect()),
+            TypeKind::Refine(b, p) => Ty::Refine(Box::new(self.resolve(b)), p.clone()),
+            TypeKind::Record { fields, open } => {
+                let mut out: Vec<Field> = Vec::new();
+                for fd in fields {
+                    if out.iter().any(|f| f.name == fd.name) {
+                        self.diags.push(Diag::new(fd.span, format!("duplicate field `{}`", fd.name)));
+                        continue;
+                    }
+                    let ty = self.resolve(&fd.ty);
+                    let presence = match (&fd.default, fd.optional) {
+                        (Some(_), true) => {
+                            self.diags.push(Diag::new(
+                                fd.span,
+                                format!("field `{}` has a default, so it is already optional; remove the `?`", fd.name),
+                            ));
+                            Presence::Optional
+                        }
+                        (Some(e), false) => Presence::Default(e.clone()),
+                        (None, true) => Presence::Optional,
+                        // A field whose type has exactly one value fills itself in.
+                        (None, false) => match self.unfold(&ty) {
+                            Ty::Lit(l) => Presence::Default(Expr::lit(l, fd.span)),
+                            _ => Presence::Required,
+                        },
+                    };
+                    out.push(Field { name: fd.name.clone(), ty, presence });
+                }
+                Ty::Record(Rec { fields: out, open: *open })
+            }
+        }
     }
+
+    fn resolve_alias(&mut self, n: &str, at: &TypeExpr) {
+        if self.aliases.contains_key(n) {
+            return;
+        }
+        if self.resolving.iter().any(|r| r == n) {
+            self.diags.push(Diag::new(
+                at.span,
+                format!("type alias `{n}` is recursive; use `Json` for recursive data"),
+            ));
+            self.aliases.insert(n.to_string(), Ty::Error);
+            return;
+        }
+        let src = self.alias_src[n].clone();
+        self.resolving.push(n.to_string());
+        let t = self.resolve(&src);
+        self.resolving.pop();
+        self.aliases.entry(n.to_string()).or_insert(t);
+    }
+
+    /// Expand an alias (repeatedly) to its definition.
+    pub fn unfold(&self, t: &Ty) -> Ty {
+        match t {
+            Ty::Alias(n) => self.aliases.get(n).map_or(Ty::Error, |t| self.unfold(t)),
+            t => t.clone(),
+        }
+    }
+
+    /// Unfold aliases and strip refinements: the shape of a value.
+    pub fn shape(&self, t: &Ty) -> Ty {
+        match self.unfold(&self.norm(t)) {
+            Ty::Refine(b, _) => self.shape(&b),
+            t => t,
+        }
+    }
+
+    // ---------- normalization (SPEC §3.2) ----------
 
     pub fn union(&self, ts: Vec<Ty>) -> Ty {
         self.norm(&Ty::Union(ts))
     }
 
-    /// SPEC §4: flatten unions, drop `Never`, drop subsumed members,
-    /// collapse uninhabited products/refinements to `Never`.
     pub fn norm(&self, t: &Ty) -> Ty {
         match t {
             Ty::Union(ms) => {
@@ -196,10 +342,16 @@ impl TypeCtx {
                         n => flat.push(n),
                     }
                 }
+                let t = Ty::Lit(Lit::Bool(true));
+                let f = Ty::Lit(Lit::Bool(false));
+                if flat.contains(&t) && flat.contains(&f) {
+                    let pos = flat.iter().position(|m| *m == t || *m == f).unwrap();
+                    flat.retain(|m| *m != t && *m != f);
+                    flat.insert(pos.min(flat.len()), Ty::Bool);
+                }
                 let mut kept = Vec::new();
                 for (i, m) in flat.iter().enumerate() {
-                    // Drop `m` if another member strictly contains it; among
-                    // equivalent members keep the first.
+                    // Drop `m` if another member contains it; among equivalent members keep the first.
                     let subsumed = flat.iter().enumerate().any(|(j, o)| {
                         j != i && self.sub_n(m, o, Mode::Strict) && (j < i || !self.sub_n(o, m, Mode::Strict))
                     });
@@ -207,28 +359,32 @@ impl TypeCtx {
                         kept.push(m.clone());
                     }
                 }
-                let mut kept = self.collapse_enums(kept);
                 match kept.len() {
                     0 => Ty::Never,
                     1 => kept.pop().unwrap(),
                     _ => Ty::Union(kept),
                 }
             }
-            Ty::Record { fields, open } => {
-                let mut nf = BTreeMap::new();
-                for (l, ft) in fields {
-                    match self.norm(ft) {
-                        Ty::Never => return Ty::Never,
-                        n => {
-                            nf.insert(l.clone(), n);
-                        }
+            Ty::Record(r) => {
+                let mut fields = Vec::new();
+                for f in &r.fields {
+                    let ty = self.norm(&f.ty);
+                    if ty == Ty::Never && f.presence == Presence::Required {
+                        return Ty::Never;
                     }
+                    fields.push(Field { ty, ..f.clone() });
                 }
-                Ty::Record { fields: nf, open: *open }
+                Ty::Record(Rec { fields, open: r.open })
             }
+            Ty::Tuple(ts) => {
+                let ts: Vec<Ty> = ts.iter().map(|t| self.norm(t)).collect();
+                if ts.contains(&Ty::Never) { Ty::Never } else { Ty::Tuple(ts) }
+            }
+            Ty::List(t) => Ty::List(Box::new(self.norm(t))),
+            Ty::Map(t) => Ty::Map(Box::new(self.norm(t))),
             Ty::Refine(b, p) => {
                 let nb = self.norm(b);
-                match const_eval(p) {
+                match eval_closed(p) {
                     Some(Value::Bool(true)) => return nb,
                     Some(Value::Bool(false)) => return Ty::Never,
                     _ => {}
@@ -240,75 +396,75 @@ impl TypeCtx {
                     other => Ty::Refine(Box::new(other), p.clone()),
                 }
             }
-            Ty::Fn(ps, r) => Ty::Fn(ps.iter().map(|p| self.norm(p)).collect(), Box::new(self.norm(r))),
-            Ty::Enum(e) if self.enums.get(e).is_some_and(|v| v.is_empty()) => Ty::Never,
+            Ty::Alias(_) if self.unfold(t) == Ty::Never => Ty::Never,
             t => t.clone(),
         }
     }
 
-    /// Replace a complete set of `E.V` members with `E`.
-    fn collapse_enums(&self, mut ms: Vec<Ty>) -> Vec<Ty> {
-        let enum_names: Vec<String> = ms
-            .iter()
-            .filter_map(|m| if let Ty::Variant(e, _) = m { Some(e.clone()) } else { None })
-            .collect();
-        for e in enum_names {
-            let all = self.variants(&e);
-            if !all.is_empty() && all.iter().all(|v| ms.contains(v)) {
-                let pos = ms.iter().position(|m| all.contains(m)).unwrap();
-                ms.retain(|m| !all.contains(m));
-                ms.insert(pos.min(ms.len()), Ty::Enum(e));
-            }
+    /// The union members of `t`, with aliases unfolded and `Bool`/`Json` expanded.
+    pub fn members(&self, t: &Ty) -> Vec<Ty> {
+        match self.unfold(&self.norm(t)) {
+            Ty::Never => vec![],
+            Ty::Union(ms) => ms.iter().flat_map(|m| self.members(m)).collect(),
+            Ty::Bool => vec![Ty::Lit(Lit::Bool(true)), Ty::Lit(Lit::Bool(false))],
+            Ty::Json => Ty::json_members(),
+            m => vec![m],
         }
-        ms
     }
 
-    /// The union members of `t`, with enums expanded into their variants.
-    pub fn members(&self, t: &Ty) -> Vec<Ty> {
-        let expand = |m: Ty| match m {
-            Ty::Enum(e) => self.variants(&e),
-            m => vec![m],
-        };
-        match self.norm(t) {
-            Ty::Never => vec![],
-            Ty::Union(ms) => ms.into_iter().flat_map(expand).collect(),
-            m => expand(m),
-        }
-    }
+    // ---------- subtyping (SPEC §3.1) ----------
 
     pub fn sub(&self, a: &Ty, b: &Ty, mode: Mode) -> bool {
         self.sub_n(&self.norm(a), &self.norm(b), mode)
     }
 
-    /// Subtyping on normalized types (SPEC §3).
     fn sub_n(&self, a: &Ty, b: &Ty, mode: Mode) -> bool {
         use Ty::*;
         if a == b {
             return true;
         }
         match (a, b) {
-            (Error, _) | (_, Error) | (Never, _) => true,
+            (Error, _) | (_, Error) | (Never, _) | (_, Json) => true,
+            (Alias(_), _) => self.sub_n(&self.unfold(a), b, mode),
+            (_, Alias(_)) => self.sub_n(a, &self.unfold(b), mode),
             (Union(ms), _) => ms.iter().all(|m| self.sub_n(m, b, mode)),
-            (Enum(e), _) => self.variants(e).iter().all(|v| self.sub_n(v, b, mode)),
+            (Json, _) => Ty::json_members().iter().all(|m| self.sub_n(m, b, mode)),
+            (Bool, _) => {
+                self.sub_n(&Lit(crate::ast::Lit::Bool(true)), b, mode)
+                    && self.sub_n(&Lit(crate::ast::Lit::Bool(false)), b, mode)
+            }
             (_, Union(ms)) => {
                 ms.iter().any(|m| self.sub_n(a, m, mode)) || matches!(a, Refine(ab, _) if self.sub_n(ab, b, mode))
             }
-            (Refine(ab, p), Refine(bb, q)) => {
-                self.sub_n(ab, bb, mode) && (mode == Mode::Erased || implies(p, q))
-            }
+            (Refine(ab, p), Refine(bb, q)) => self.sub_n(ab, bb, mode) && (mode == Mode::Erased || implies(p, q)),
             (Refine(ab, _), _) => self.sub_n(ab, b, mode),
             (_, Refine(bb, _)) => mode == Mode::Erased && self.sub_n(a, bb, mode),
-            (Variant(e, _), Enum(e2)) => e == e2,
-            (Record { fields: af, open: ao }, Record { fields: bf, open: bo }) => {
-                if !*bo && (*ao || af.len() != bf.len()) {
+            (Lit(l), Bool) => matches!(l, crate::ast::Lit::Bool(_)),
+            (Lit(l), Int) => matches!(l, crate::ast::Lit::Int(_)),
+            (Lit(l), Float) => matches!(l, crate::ast::Lit::Int(_) | crate::ast::Lit::Float(_)),
+            (Lit(l), Str) => matches!(l, crate::ast::Lit::Str(_)),
+            (Int, Float) => true,
+            (List(x), List(y)) => self.sub_n(x, y, mode),
+            (Tuple(xs), Tuple(ys)) => xs.len() == ys.len() && xs.iter().zip(ys).all(|(x, y)| self.sub_n(x, y, mode)),
+            (Tuple(xs), List(y)) => xs.iter().all(|x| self.sub_n(x, y, mode)),
+            (Map(x), Map(y)) => self.sub_n(x, y, mode),
+            (Record(r), Map(y)) => {
+                r.fields.iter().all(|f| self.sub_n(&f.ty, y, mode)) && (!r.open || self.sub_n(&Json, y, mode))
+            }
+            (Map(x), Record(r)) => {
+                r.open && r.fields.iter().all(|f| f.presence != Presence::Required && self.sub_n(x, &f.ty, mode))
+            }
+            (Record(ra), Record(rb)) => {
+                if ra.open && !rb.open {
                     return false;
                 }
-                bf.iter().all(|(l, bt)| af.get(l).is_some_and(|at| self.sub_n(at, bt, mode)))
-            }
-            (Fn(ap, ar), Fn(bp, br)) => {
-                ap.len() == bp.len()
-                    && ap.iter().zip(bp).all(|(x, y)| self.sub_n(y, x, mode))
-                    && self.sub_n(ar, br, mode)
+                let targets_ok = rb.fields.iter().all(|bf| match ra.get(&bf.name) {
+                    None => bf.presence != Presence::Required,
+                    Some(af) => {
+                        !(bf.presence == Presence::Required && !af.present()) && self.sub_n(&af.ty, &bf.ty, mode)
+                    }
+                });
+                targets_ok && (rb.open || ra.fields.iter().all(|af| rb.get(&af.name).is_some()))
             }
             _ => false,
         }
@@ -328,93 +484,4 @@ impl TypeCtx {
         }
         self.union(out)
     }
-}
-
-#[derive(Debug, Clone, PartialEq)]
-pub enum Value {
-    Int(i64),
-    Float(f64),
-    Bool(bool),
-    Str(String),
-}
-
-/// Evaluate a closed expression. Short-circuits `&&`/`||` even when one side is unknown.
-pub fn const_eval(e: &Expr) -> Option<Value> {
-    use Value as V;
-    match &e.kind {
-        ExprKind::Int(i) => Some(V::Int(*i)),
-        ExprKind::Float(x) => Some(V::Float(*x)),
-        ExprKind::Str(s) => Some(V::Str(s.clone())),
-        ExprKind::Bool(b) => Some(V::Bool(*b)),
-        ExprKind::Unary(UnOp::Neg, x) => match const_eval(x)? {
-            V::Int(i) => i.checked_neg().map(V::Int),
-            V::Float(f) => Some(V::Float(-f)),
-            _ => None,
-        },
-        ExprKind::Unary(UnOp::Not, x) => match const_eval(x)? {
-            V::Bool(b) => Some(V::Bool(!b)),
-            _ => None,
-        },
-        ExprKind::Binary(op @ (BinOp::And | BinOp::Or), l, r) => {
-            let short = *op == BinOp::Or; // value that decides the result
-            match (const_eval(l), const_eval(r)) {
-                (Some(V::Bool(x)), _) | (_, Some(V::Bool(x))) if x == short => Some(V::Bool(short)),
-                (Some(V::Bool(_)), Some(V::Bool(_))) => Some(V::Bool(!short)),
-                _ => None,
-            }
-        }
-        ExprKind::Binary(op, l, r) => eval_bin(*op, const_eval(l)?, const_eval(r)?),
-        _ => None,
-    }
-}
-
-fn eval_bin(op: BinOp, a: Value, b: Value) -> Option<Value> {
-    use BinOp::*;
-    use Value as V;
-    Some(match (a, b) {
-        (V::Int(x), V::Int(y)) => match op {
-            Add => V::Int(x.checked_add(y)?),
-            Sub => V::Int(x.checked_sub(y)?),
-            Mul => V::Int(x.checked_mul(y)?),
-            Div => V::Int(x.checked_div(y)?),
-            Rem => V::Int(x.checked_rem(y)?),
-            Eq => V::Bool(x == y),
-            Ne => V::Bool(x != y),
-            Lt => V::Bool(x < y),
-            Le => V::Bool(x <= y),
-            Gt => V::Bool(x > y),
-            Ge => V::Bool(x >= y),
-            And | Or => return None,
-        },
-        (V::Float(x), V::Float(y)) => match op {
-            Add => V::Float(x + y),
-            Sub => V::Float(x - y),
-            Mul => V::Float(x * y),
-            Div => V::Float(x / y),
-            Rem => V::Float(x % y),
-            Eq => V::Bool(x == y),
-            Ne => V::Bool(x != y),
-            Lt => V::Bool(x < y),
-            Le => V::Bool(x <= y),
-            Gt => V::Bool(x > y),
-            Ge => V::Bool(x >= y),
-            And | Or => return None,
-        },
-        (V::Str(x), V::Str(y)) => match op {
-            Add => V::Str(x + &y),
-            Eq => V::Bool(x == y),
-            Ne => V::Bool(x != y),
-            Lt => V::Bool(x < y),
-            Le => V::Bool(x <= y),
-            Gt => V::Bool(x > y),
-            Ge => V::Bool(x >= y),
-            _ => return None,
-        },
-        (V::Bool(x), V::Bool(y)) => match op {
-            Eq => V::Bool(x == y),
-            Ne => V::Bool(x != y),
-            _ => return None,
-        },
-        _ => return None,
-    })
 }

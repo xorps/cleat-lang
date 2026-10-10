@@ -11,3 +11,4 @@ name = "tl"
 path = "src/bin/tl.rs"
 
 [dependencies]
+regex = "1"
