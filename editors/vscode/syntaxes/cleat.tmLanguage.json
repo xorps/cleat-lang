@@ -3,17 +3,42 @@
   "name": "Cleat",
   "scopeName": "source.cleat",
   "patterns": [
-    { "include": "#comment" },
-    { "include": "#declaration" },
-    { "include": "#export" },
-    { "include": "#string" },
-    { "include": "#number" },
-    { "include": "#keyword" },
-    { "include": "#constant" },
-    { "include": "#type" },
-    { "include": "#call" },
-    { "include": "#key" },
-    { "include": "#operator" }
+    {
+      "include": "#comment"
+    },
+    {
+      "include": "#import"
+    },
+    {
+      "include": "#declaration"
+    },
+    {
+      "include": "#export"
+    },
+    {
+      "include": "#string"
+    },
+    {
+      "include": "#number"
+    },
+    {
+      "include": "#keyword"
+    },
+    {
+      "include": "#constant"
+    },
+    {
+      "include": "#type"
+    },
+    {
+      "include": "#call"
+    },
+    {
+      "include": "#key"
+    },
+    {
+      "include": "#operator"
+    }
   ],
   "repository": {
     "comment": {
@@ -24,31 +49,67 @@
       "patterns": [
         {
           "match": "\\b(type)\\s+([A-Za-z_][A-Za-z0-9_]*)",
-          "captures": { "1": { "name": "storage.type.cleat" }, "2": { "name": "entity.name.type.cleat" } }
+          "captures": {
+            "1": {
+              "name": "storage.type.cleat"
+            },
+            "2": {
+              "name": "entity.name.type.cleat"
+            }
+          }
         },
         {
           "match": "\\b(fn)\\s+([A-Za-z_][A-Za-z0-9_]*)",
-          "captures": { "1": { "name": "storage.type.function.cleat" }, "2": { "name": "entity.name.function.cleat" } }
+          "captures": {
+            "1": {
+              "name": "storage.type.function.cleat"
+            },
+            "2": {
+              "name": "entity.name.function.cleat"
+            }
+          }
         },
         {
           "match": "\\b(input|let)\\s+([A-Za-z_][A-Za-z0-9_]*)",
-          "captures": { "1": { "name": "storage.type.cleat" }, "2": { "name": "variable.other.declaration.cleat" } }
+          "captures": {
+            "1": {
+              "name": "storage.type.cleat"
+            },
+            "2": {
+              "name": "variable.other.declaration.cleat"
+            }
+          }
         }
       ]
     },
     "export": {
       "match": "\\b(export)\\s+([a-z_][A-Za-z0-9_]*)(?=\\s*(=|after\\b))(?:\\s+(after)\\b)?",
       "captures": {
-        "1": { "name": "keyword.control.export.cleat" },
-        "2": { "name": "entity.name.namespace.cleat" },
-        "4": { "name": "keyword.control.cleat" }
+        "1": {
+          "name": "keyword.control.export.cleat"
+        },
+        "2": {
+          "name": "entity.name.namespace.cleat"
+        },
+        "4": {
+          "name": "keyword.control.cleat"
+        }
       }
     },
     "keyword": {
       "patterns": [
-        { "match": "\\b(if|then|else|match|for|in|where|export|after)\\b", "name": "keyword.control.cleat" },
-        { "match": "\\b(type|input|let|fn)\\b", "name": "storage.type.cleat" },
-        { "match": "\\bself\\b", "name": "variable.language.self.cleat" }
+        {
+          "match": "\\b(import|if|then|else|match|for|in|where|export|after)\\b",
+          "name": "keyword.control.cleat"
+        },
+        {
+          "match": "\\b(type|input|let|fn)\\b",
+          "name": "storage.type.cleat"
+        },
+        {
+          "match": "\\bself\\b",
+          "name": "variable.language.self.cleat"
+        }
       ]
     },
     "constant": {
@@ -83,14 +144,43 @@
         {
           "begin": "\\\\\\(",
           "end": "\\)",
-          "beginCaptures": { "0": { "name": "punctuation.section.interpolation.begin.cleat" } },
-          "endCaptures": { "0": { "name": "punctuation.section.interpolation.end.cleat" } },
+          "beginCaptures": {
+            "0": {
+              "name": "punctuation.section.interpolation.begin.cleat"
+            }
+          },
+          "endCaptures": {
+            "0": {
+              "name": "punctuation.section.interpolation.end.cleat"
+            }
+          },
           "name": "meta.interpolation.cleat",
           "contentName": "source.cleat",
-          "patterns": [{ "include": "$self" }]
+          "patterns": [
+            {
+              "include": "$self"
+            }
+          ]
         },
-        { "match": "\\\\[ntr\"\\\\]", "name": "constant.character.escape.cleat" }
+        {
+          "match": "\\\\[ntr\"\\\\]",
+          "name": "constant.character.escape.cleat"
+        }
       ]
+    },
+    "import": {
+      "match": "\\b(import)\\s+([A-Za-z_][A-Za-z0-9_]*)\\s+(from)\\b",
+      "captures": {
+        "1": {
+          "name": "keyword.control.import.cleat"
+        },
+        "2": {
+          "name": "entity.name.namespace.cleat"
+        },
+        "3": {
+          "name": "keyword.control.import.cleat"
+        }
+      }
     }
   }
 }

@@ -8,10 +8,11 @@ const USAGE: &str = "\
 usage:
   cleat check  <file.cleat> [--vcs]
   cleat export <file.cleat> [options]
+  cleat gen <schema>         print Cleat types for an OpenAPI document or CRD file
   cleat lsp                  language server on stdio (used by editors)
 
 export options:
-  --input <file.json>      input values as a JSON object
+  --input <file>           input values: a JSON or YAML object
   --set <name>=<value>     one input (decoded by its declared type); repeatable
   --argocd-params          read inputs from $ARGOCD_APP_PARAMETERS (Argo CD plugin)
   --target <t>             plain (default) | argocd (sync waves) | flux (needs --out)
@@ -38,6 +39,22 @@ fn main() -> ExitCode {
         eprintln!("{USAGE}");
         return ExitCode::from(2);
     };
+    if cmd == "gen" {
+        let Some(path) = args.get(1) else {
+            eprintln!("{USAGE}");
+            return ExitCode::from(2);
+        };
+        return match cleat::modules::generate_source(std::path::Path::new(path)) {
+            Ok(src) => {
+                print!("{src}");
+                ExitCode::SUCCESS
+            }
+            Err(e) => {
+                eprintln!("error: {e}");
+                ExitCode::FAILURE
+            }
+        };
+    }
     if cmd == "lsp" {
         return match cleat::lsp::run() {
             Ok(()) => ExitCode::SUCCESS,
@@ -97,9 +114,17 @@ fn parse_opts(args: &[String]) -> Result<Opts, String> {
             "--input" => {
                 let path = val()?;
                 let text = std::fs::read_to_string(&path).map_err(|e| format!("cannot read {path}: {e}"))?;
-                match json::parse(&text).map_err(|e| format!("{path}: {e}"))? {
+                let value = if path.ends_with(".yaml") || path.ends_with(".yml") {
+                    match cleat::yaml::parse_docs(&text).map_err(|e| format!("{path}: {e}"))?.as_slice() {
+                        [v] => v.clone(),
+                        _ => return Err(format!("{path}: expected exactly one YAML document")),
+                    }
+                } else {
+                    json::parse(&text).map_err(|e| format!("{path}: {e}"))?
+                };
+                match value {
                     Value::Obj(es) => o.inputs.extend(es.into_iter().map(|(k, v)| (k, InputValue::Json(v)))),
-                    _ => return Err(format!("{path}: inputs must be a JSON object")),
+                    _ => return Err(format!("{path}: inputs must be an object")),
                 }
             }
             "--set" => {
@@ -161,7 +186,7 @@ fn print_diags(file: &str, out: &Outcome) {
 }
 
 fn check(opts: &Opts, src: &str) -> ExitCode {
-    let out = cleat::check_source(src);
+    let out = cleat::check_source_at(src, base_dir(&opts.file).as_deref());
     print_diags(&opts.file, &out);
     if opts.vcs {
         for vc in &out.vcs {
@@ -181,7 +206,8 @@ fn check(opts: &Opts, src: &str) -> ExitCode {
 
 fn export(opts: Opts, src: &str) -> ExitCode {
     let file = &opts.file;
-    let (outcome, comps) = match cleat::export(src, opts.inputs) {
+    let base = base_dir(file);
+    let (outcome, comps) = match cleat::export_at(src, base.as_deref(), opts.inputs) {
         Ok(r) => r,
         Err(ExportError::Check(out)) => {
             print_diags(file, &out);
@@ -243,4 +269,8 @@ fn export(opts: Opts, src: &str) -> ExitCode {
         print!("{}", emit::to_yaml_stream(&docs));
     }
     ExitCode::SUCCESS
+}
+
+fn base_dir(file: &str) -> Option<std::path::PathBuf> {
+    std::path::Path::new(file).parent().map(|p| if p.as_os_str().is_empty() { ".".into() } else { p.to_path_buf() })
 }

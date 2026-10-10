@@ -140,6 +140,32 @@ impl Parser {
         }
     }
 
+    /// `a` or `a.b.c` (qualified type names).
+    fn dotted_ident(&mut self) -> PResult<String> {
+        let (mut name, _) = self.ident()?;
+        while *self.peek() == Tok::Dot && matches!(self.peek_at(1), Tok::Ident(_)) {
+            self.bump();
+            name.push('.');
+            name.push_str(&self.ident()?.0);
+        }
+        Ok(name)
+    }
+
+    /// Number of tokens in a `.Ident` chain at the cursor that ends in an
+    /// uppercase name followed by `{`: a qualified typed literal (`k8s.Deployment {`).
+    fn qualified_struct_len(&self) -> Option<usize> {
+        let mut i = 0;
+        let mut last_upper = false;
+        while *self.peek_at(i) == Tok::Dot {
+            match self.peek_at(i + 1) {
+                Tok::Ident(n) => last_upper = is_upper(n),
+                _ => return None,
+            }
+            i += 2;
+        }
+        (i > 0 && last_upper && *self.peek_at(i) == Tok::LBrace && !self.no_struct).then_some(i)
+    }
+
     /// A plain string literal (no interpolation), e.g. a quoted key.
     fn plain_str(&self) -> Option<String> {
         match self.peek() {
@@ -176,9 +202,19 @@ impl Parser {
     fn item(&mut self) -> PResult<Item> {
         let span = self.span();
         match self.peek() {
-            Tok::Type => {
+            Tok::Import => {
                 self.bump();
                 let (name, _) = self.ident()?;
+                if !self.eat(&Tok::Ident("from".into())) {
+                    return self.err("`from`");
+                }
+                let Some(path) = self.plain_str() else { return self.err("a file path string") };
+                self.bump();
+                Ok(Item::Import { name, path, span })
+            }
+            Tok::Type => {
+                self.bump();
+                let name = self.dotted_ident()?;
                 self.expect(&Tok::Eq)?;
                 Ok(Item::Type { name, ty: self.ty()?, span })
             }
@@ -243,7 +279,7 @@ impl Parser {
                 }
                 Ok(Item::Export { name, after, value: self.expr_s()?, span })
             }
-            _ => self.err("`type`, `input`, `let`, `fn` or `export`"),
+            _ => self.err("`import`, `type`, `input`, `let`, `fn` or `export`"),
         }
     }
 
@@ -274,10 +310,7 @@ impl Parser {
     fn ty_atom(&mut self) -> PResult<TypeExpr> {
         let span = self.span();
         let kind = match self.peek().clone() {
-            Tok::Ident(n) => {
-                self.bump();
-                TypeKind::Named(n)
-            }
+            Tok::Ident(_) => TypeKind::Named(self.dotted_ident()?),
             Tok::Null => {
                 self.bump();
                 TypeKind::Lit(Lit::Null)
@@ -535,6 +568,15 @@ impl Parser {
                     Tok::LBrace if is_upper(&n) && !self.no_struct => {
                         let obj = self.object()?;
                         ExprKind::Typed(n, Box::new(obj))
+                    }
+                    Tok::Dot if self.qualified_struct_len().is_some() => {
+                        let mut name = n;
+                        while self.eat(&Tok::Dot) {
+                            name.push('.');
+                            name.push_str(&self.ident()?.0);
+                        }
+                        let obj = self.object()?;
+                        ExprKind::Typed(name, Box::new(obj))
                     }
                     _ => ExprKind::Var(n),
                 }

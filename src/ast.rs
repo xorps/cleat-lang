@@ -506,4 +506,6 @@ pub enum Item {
     /// `export e` or `export name (after a, b)? = e`. Named exports are
     /// components; `after` orders them (Argo sync waves, Flux `dependsOn`).
     Export { name: Option<String>, after: Vec<(String, Span)>, value: Expr, span: Span },
+    /// `import name from "path"`: the module's types become `name.T`.
+    Import { name: String, path: String, span: Span },
 }

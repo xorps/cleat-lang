@@ -220,6 +220,8 @@ pub struct TypeCtx {
     pub alias_src: HashMap<String, TypeExpr>,
     pub aliases: HashMap<String, Ty>,
     resolving: Vec<String>,
+    /// Documentation for imported types and fields, keyed `ns.Type` / `ns.Type.field`.
+    pub docs: HashMap<String, String>,
     /// Diagnostics from resolution; the checker drains these.
     pub diags: Vec<Diag>,
 }
@@ -248,7 +250,8 @@ impl TypeCtx {
                     Ty::Alias(n.clone())
                 }
                 _ => {
-                    self.diags.push(Diag::new(te.span, format!("unknown type `{n}`")));
+                    let msg = self.unknown_type_message(n);
+                    self.diags.push(Diag::new(te.span, msg));
                     Ty::Error
                 }
             },
@@ -286,6 +289,26 @@ impl TypeCtx {
                 }
                 Ty::Record(Rec { fields: out, open: *open })
             }
+        }
+    }
+
+    /// For `k8s.Event`, list the qualified names that end in `Event`; otherwise suggest a near miss.
+    pub fn unknown_type_message(&self, n: &str) -> String {
+        if let Some((ns, short)) = n.split_once('.') {
+            let mut cands: Vec<&String> = self
+                .alias_src
+                .keys()
+                .filter(|k| k.starts_with(&format!("{ns}.")) && k.ends_with(&format!(".{short}")))
+                .collect();
+            cands.sort();
+            if !cands.is_empty() {
+                let list: Vec<String> = cands.iter().take(6).map(|c| format!("`{c}`")).collect();
+                return format!("`{n}` is ambiguous; use one of {}", list.join(", "));
+            }
+        }
+        match crate::eval::suggest(n, self.alias_src.keys().map(String::as_str)) {
+            Some(s) => format!("unknown type `{n}`; did you mean `{s}`?"),
+            None => format!("unknown type `{n}`"),
         }
     }
 

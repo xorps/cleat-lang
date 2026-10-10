@@ -15,6 +15,7 @@ pub enum Tok {
     Str(Vec<StrPart>),
     // keywords
     Type,
+    Import,
     Input,
     Let,
     Fn,
@@ -66,8 +67,9 @@ pub enum Tok {
     Eof,
 }
 
-const KEYWORDS: [(&str, Tok); 15] = [
+const KEYWORDS: [(&str, Tok); 16] = [
     ("type", Tok::Type),
+    ("import", Tok::Import),
     ("input", Tok::Input),
     ("let", Tok::Let),
     ("fn", Tok::Fn),

@@ -176,7 +176,7 @@ pub fn run(items: &[Item], ctx: TypeCtx, inputs: Vec<(String, InputValue)>) -> R
                 let after = after.iter().map(|(a, _)| a.clone()).collect();
                 comps.push(Component { name: name.clone(), after, docs });
             }
-            Item::Type { .. } => {}
+            Item::Type { .. } | Item::Import { .. } => {}
         }
     }
     if errs.is_empty() { Ok(comps) } else { Err(errs) }
@@ -319,6 +319,10 @@ impl Evaluator {
         };
         match t {
             Ty::Alias(n) => {
+                if !self.ctx.aliases.contains_key(n) {
+                    let te = TypeExpr { kind: TypeKind::Named(n.clone()), span: Span::default() };
+                    self.ctx.resolve(&te);
+                }
                 let inner = self.ctx.unfold(t);
                 let n = n.clone();
                 self.conform(v, &inner, path, Some(&n))
@@ -422,7 +426,7 @@ impl Evaluator {
         alias: Option<&str>,
     ) -> Result<Value, String> {
         let shown = alias.map_or_else(|| t.to_string(), str::to_string);
-        let Value::Obj(mut entries) = v else {
+        let Value::Obj(entries) = v else {
             return Err(at(path, format!("expected `{shown}`, got {} ({})", v.short(), v.kind())));
         };
         if !r.open {
@@ -433,32 +437,47 @@ impl Evaluator {
                 return Err(at(path, format!("unknown field `{k}` in `{shown}`{hint}")));
             }
         }
-        let mut out = Vec::new();
+        // Output order: fields that fill themselves in from a single-literal type
+        // (`apiVersion`, `kind`) first, then the given fields in source order, then other defaults.
+        let (mut front, mut back) = (Vec::new(), Vec::new());
         for f in &r.fields {
-            let taken = entries.iter().position(|(k, _)| *k == f.name).map(|i| entries.remove(i).1);
+            if entries.iter().any(|(k, _)| *k == f.name) {
+                continue;
+            }
             path.push(path_key(&f.name));
-            match taken {
-                Some(Value::Null)
-                    if f.presence == Presence::Optional && !self.ctx.sub(&Ty::null(), &f.ty, Mode::Erased) => {}
-                Some(x) => out.push((f.name.clone(), self.conform(x, &f.ty, path, None)?)),
-                None => match &f.presence {
-                    Presence::Required => {
-                        path.pop();
-                        return Err(at(path, format!("missing required field `{}` (`{}`) in `{shown}`", f.name, f.ty)));
-                    }
-                    Presence::Optional => {}
-                    Presence::Default(e) => {
-                        let saved = std::mem::take(&mut self.locals);
-                        let d = self.eval(e);
-                        self.locals = saved;
-                        let d = d.map_err(|e| at(path, format!("evaluating default: {}", e.msg)))?;
-                        out.push((f.name.clone(), self.conform(d, &f.ty, path, None)?));
-                    }
-                },
+            match &f.presence {
+                Presence::Required => {
+                    path.pop();
+                    return Err(at(path, format!("missing required field `{}` (`{}`) in `{shown}`", f.name, f.ty)));
+                }
+                Presence::Optional => {}
+                Presence::Default(e) => {
+                    let saved = std::mem::take(&mut self.locals);
+                    let d = self.eval(e);
+                    self.locals = saved;
+                    let d = d.map_err(|e| at(path, format!("evaluating default: {}", e.msg)))?;
+                    let v = self.conform(d, &f.ty, path, None)?;
+                    let singleton = matches!(self.ctx.unfold(&f.ty), Ty::Lit(_));
+                    if singleton { &mut front } else { &mut back }.push((f.name.clone(), v));
+                }
             }
             path.pop();
         }
-        out.extend(entries); // extra fields of an open record, in their original order
+        let mut out = front;
+        for (k, x) in entries {
+            let Some(f) = r.get(&k) else {
+                out.push((k, x)); // extra field of an open record
+                continue;
+            };
+            if x == Value::Null && f.presence == Presence::Optional && !self.ctx.sub(&Ty::null(), &f.ty, Mode::Erased) {
+                continue;
+            }
+            path.push(path_key(&k));
+            let v = self.conform(x, &f.ty, path, None)?;
+            path.pop();
+            out.push((k, v));
+        }
+        out.extend(back);
         Ok(Value::Obj(out))
     }
 
@@ -950,10 +969,7 @@ fn builtin(name: &str, args: Vec<Value>) -> Result<Value, String> {
         ("starts_with", [Str(s), Str(p)]) => Bool(s.starts_with(p.as_str())),
         ("ends_with", [Str(s), Str(p)]) => Bool(s.ends_with(p.as_str())),
         ("replace", [Str(s), Str(from), Str(to)]) => Str(s.replace(from.as_str(), to)),
-        ("matches", [Str(s), Str(re)]) => {
-            let re = regex::Regex::new(re).map_err(|e| format!("invalid regex: {e}"))?;
-            Bool(re.is_match(s))
-        }
+        ("matches", [Str(s), Str(re)]) => Bool(regex_cached(re)?.is_match(s)),
         ("min" | "max", [Int(a), Int(b)]) => Int(if name == "min" { *a.min(b) } else { *a.max(b) }),
         ("min" | "max", [a, b]) => match (num(a), num(b)) {
             (Some(x), Some(y)) => Float(if name == "min" { x.min(y) } else { x.max(y) }),
@@ -979,5 +995,20 @@ fn builtin(name: &str, args: Vec<Value>) -> Result<Value, String> {
         ("error", [Str(msg)]) => return Err(msg.clone()),
         _ if BUILTINS.contains(&name) => return Err(bad(&args)),
         _ => return Err(format!("unknown function `{name}`")),
+    })
+}
+
+/// Compiled regexes, since refinements from schemas run `matches` for every value.
+fn regex_cached(re: &str) -> Result<regex::Regex, String> {
+    thread_local! {
+        static CACHE: std::cell::RefCell<HashMap<String, regex::Regex>> = Default::default();
+    }
+    CACHE.with(|c| {
+        if let Some(r) = c.borrow().get(re) {
+            return Ok(r.clone());
+        }
+        let r = regex::Regex::new(re).map_err(|e| format!("invalid regex: {e}"))?;
+        c.borrow_mut().insert(re.to_string(), r.clone());
+        Ok(r)
     })
 }
