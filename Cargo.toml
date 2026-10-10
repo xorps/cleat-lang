@@ -1,14 +1,14 @@
 [package]
-name = "test-lang"
+name = "cleat-lang"
 version = "0.1.0"
 edition = "2024"
 
 [lib]
-name = "test_lang"
+name = "cleat"
 
 [[bin]]
-name = "tl"
-path = "src/bin/tl.rs"
+name = "cleat"
+path = "src/bin/cleat.rs"
 
 [dependencies]
 regex = "1"

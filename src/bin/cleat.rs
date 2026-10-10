@@ -1,13 +1,13 @@
 use std::process::ExitCode;
 
-use test_lang::targets::{self, FluxOptions};
-use test_lang::vc::VcStatus;
-use test_lang::{ExportError, InputValue, Outcome, Value, emit, json};
+use cleat::targets::{self, FluxOptions};
+use cleat::vc::VcStatus;
+use cleat::{ExportError, InputValue, Outcome, Value, emit, json};
 
 const USAGE: &str = "\
 usage:
-  tl check  <file> [--vcs]
-  tl export <file> [options]
+  cleat check  <file.cleat> [--vcs]
+  cleat export <file.cleat> [options]
 
 export options:
   --input <file.json>      input values as a JSON object
@@ -109,7 +109,7 @@ fn parse_opts(args: &[String]) -> Result<Opts, String> {
         }
     }
     if o.file.is_empty() {
-        return Err("missing <file>".into());
+        return Err("missing <file.cleat>".into());
     }
     Ok(o)
 }
@@ -151,7 +151,7 @@ fn print_diags(file: &str, out: &Outcome) {
 }
 
 fn check(opts: &Opts, src: &str) -> ExitCode {
-    let out = test_lang::check_source(src);
+    let out = cleat::check_source(src);
     print_diags(&opts.file, &out);
     if opts.vcs {
         for vc in &out.vcs {
@@ -171,7 +171,7 @@ fn check(opts: &Opts, src: &str) -> ExitCode {
 
 fn export(opts: Opts, src: &str) -> ExitCode {
     let file = &opts.file;
-    let (outcome, comps) = match test_lang::export(src, opts.inputs) {
+    let (outcome, comps) = match cleat::export(src, opts.inputs) {
         Ok(r) => r,
         Err(ExportError::Check(out)) => {
             print_diags(file, &out);

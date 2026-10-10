@@ -1,7 +1,7 @@
 // A web app and its database as Kubernetes manifests.
 //
-//   tl export examples/webapp.tl --set env=prod --set image=ghcr.io/acme/api:1.4.2
-//   tl export examples/webapp.tl --set env=dev --set image=api:dev --target argocd
+//   cleat export examples/webapp.cleat --set env=prod --set image=ghcr.io/acme/api:1.4.2
+//   cleat export examples/webapp.cleat --set env=dev --set image=api:dev --target argocd
 //
 // The Kubernetes types below are hand-written; they will come from OpenAPI import.
 

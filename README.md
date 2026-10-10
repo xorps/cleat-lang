@@ -1,4 +1,4 @@
-# test-lang
+# Cleat
 
 A typed configuration language whose values are exactly JSON, aimed at
 replacing Helm and Kustomize for Kubernetes. It has structural,
@@ -8,10 +8,10 @@ constraint that failed. See [SPEC.md](SPEC.md).
 
 ```sh
 cargo build
-./target/debug/tl check examples/webapp.tl
-./target/debug/tl export examples/webapp.tl --set env=prod --set image=ghcr.io/acme/api:1.4.2
-./target/debug/tl export examples/webapp.tl --set env=prod --set image=api:1 --target argocd
-./target/debug/tl export examples/webapp.tl --set env=prod --set image=api:1 \
+./target/debug/cleat check examples/webapp.cleat
+./target/debug/cleat export examples/webapp.cleat --set env=prod --set image=ghcr.io/acme/api:1.4.2
+./target/debug/cleat export examples/webapp.cleat --set env=prod --set image=api:1 --target argocd
+./target/debug/cleat export examples/webapp.cleat --set env=prod --set image=api:1 \
     --target flux --out deploy --flux-source infra --flux-path deploy
 cargo test
 ```
@@ -20,12 +20,12 @@ cargo test
 
 | Mistake | Caught by | Message |
 |---|---|---|
-| `metdata:` typo | `tl check` | ``unknown field `metdata` in `Svc`; did you mean `metadata`?`` |
-| `port: 70000` literal | `tl check` | ``refinement violated: `1 <= 70000 && 70000 <= 65535` is false (required by `Port`)`` |
-| optional field used without a check | `tl check` | `` `m.labels` may be null; use `?.` or `??` `` |
-| `--set env=production` | `tl export` | ``input `env`: expected `Env` (`"dev" \| "staging" \| "prod"`), got "production"`` |
-| computed port out of range | `tl export` | ``argument `port` of `container`: 70080 does not satisfy …``, followed by the call stack |
-| component dependency cycle | `tl check` | `dependency cycle between components: a -> b -> a` |
+| `metdata:` typo | `cleat check` | ``unknown field `metdata` in `Svc`; did you mean `metadata`?`` |
+| `port: 70000` literal | `cleat check` | ``refinement violated: `1 <= 70000 && 70000 <= 65535` is false (required by `Port`)`` |
+| optional field used without a check | `cleat check` | `` `m.labels` may be null; use `?.` or `??` `` |
+| `--set env=production` | `cleat export` | ``input `env`: expected `Env` (`"dev" \| "staging" \| "prod"`), got "production"`` |
+| computed port out of range | `cleat export` | ``argument `port` of `container`: 70080 does not satisfy …``, followed by the call stack |
+| component dependency cycle | `cleat check` | `dependency cycle between components: a -> b -> a` |
 
 ## Layout
 
