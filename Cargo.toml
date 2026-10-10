@@ -1,0 +1,13 @@
+[package]
+name = "test-lang"
+version = "0.1.0"
+edition = "2024"
+
+[lib]
+name = "test_lang"
+
+[[bin]]
+name = "tl"
+path = "src/bin/tl.rs"
+
+[dependencies]
