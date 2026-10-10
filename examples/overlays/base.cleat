@@ -1,0 +1,36 @@
+// Shared building blocks, imported by each environment (see prod.cleat).
+// A module can define types, functions and constants, import schemas, and refine types;
+// it cannot declare inputs or exports.
+
+import k8s from "../../schemas/kubernetes-1.31.json"
+
+refine k8s.ServiceSpec with { type: "ClusterIP" | "NodePort" | "LoadBalancer" | "ExternalName" }
+
+type DnsLabel = Str where len(self) <= 63 && matches(self, "^[a-z0-9]([-a-z0-9]*[a-z0-9])?$")
+type Port     = Int where 1 <= self && self <= 65535
+
+let part_of = "shop"
+
+fn labels(app: Str) -> { [Str]: Str } = {
+  "app.kubernetes.io/name": app,
+  "app.kubernetes.io/part-of": part_of,
+}
+
+/// A Deployment and a Service for one HTTP app.
+fn app(name: DnsLabel, image: Str, port: Port = 8080) -> [k8s.Deployment | k8s.Service] = [
+  k8s.Deployment {
+    metadata: { name, labels: labels(name) },
+    spec: {
+      replicas: 1,
+      selector.matchLabels: labels(name),
+      template: {
+        metadata.labels: labels(name),
+        spec.containers: [{ name, image, ports: [{ name: "http", containerPort: port }] }],
+      },
+    },
+  },
+  k8s.Service {
+    metadata: { name, labels: labels(name) },
+    spec: { selector: labels(name), ports: [{ name: "http", port: 80, targetPort: "http" }] },
+  },
+]

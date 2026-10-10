@@ -166,6 +166,15 @@ impl Parser {
         (i > 0 && last_upper && *self.peek_at(i) == Tok::LBrace && !self.no_struct).then_some(i)
     }
 
+    /// `.a.b(` at the cursor: a call to a function from an imported module (`lib.f(...)`).
+    fn qualified_call(&self) -> bool {
+        let mut i = 0;
+        while *self.peek_at(i) == Tok::Dot && matches!(self.peek_at(i + 1), Tok::Ident(_)) {
+            i += 2;
+        }
+        i > 0 && *self.peek_at(i) == Tok::LParen
+    }
+
     /// A plain string literal (no interpolation), e.g. a quoted key.
     fn plain_str(&self) -> Option<String> {
         match self.peek() {
@@ -338,21 +347,12 @@ impl Parser {
             }
             let span = self.span();
             let remove = self.eat(&Tok::Minus);
-            let (first, _) = self.key()?;
-            let mut last = first.clone();
-            let mut path = vec![PathSeg::Field(first)];
-            loop {
-                if self.eat(&Tok::Dot) {
-                    last = self.key()?.0;
-                    path.push(PathSeg::Field(last.clone()));
-                } else if *self.peek() == Tok::LBracket && *self.peek_at(1) == Tok::RBracket {
-                    self.bump();
-                    self.bump();
-                    path.push(PathSeg::Each);
-                } else {
-                    break;
-                }
-            }
+            let path = self.patch_path()?;
+            let last = path
+                .iter()
+                .rev()
+                .find_map(|s| if let PathSeg::Field(k) = s { Some(k.clone()) } else { None })
+                .unwrap_or_default();
             let op = if remove {
                 PatchOp::Remove
             } else if self.eat(&Tok::Where) {
@@ -365,6 +365,72 @@ impl Parser {
                 PatchOp::Set(ty, default)
             };
             patches.push(Patch { path, op, span });
+            if !self.eat(&Tok::Comma) {
+                self.expect(&Tok::RBrace)?;
+                break;
+            }
+        }
+        Ok(patches)
+    }
+
+    /// `a.b[].c[2].d[name: "x"]` in a `with` entry.
+    fn patch_path(&mut self) -> PResult<Vec<PathSeg>> {
+        // A path may start with a selector when patching a list: `[kind: "Service"].spec...`.
+        let mut path = if *self.peek() == Tok::LBracket { Vec::new() } else { vec![PathSeg::Field(self.key()?.0)] };
+        loop {
+            if self.eat(&Tok::Dot) {
+                path.push(PathSeg::Field(self.key()?.0));
+            } else if self.eat(&Tok::LBracket) {
+                if self.eat(&Tok::RBracket) {
+                    path.push(PathSeg::Each);
+                    continue;
+                }
+                if let (Tok::Int(n), Tok::RBracket) = (self.peek().clone(), self.peek_at(1)) {
+                    if n >= 0 {
+                        self.bump();
+                        self.bump();
+                        path.push(PathSeg::Index(n as usize));
+                        continue;
+                    }
+                }
+                let mut keys = Vec::new();
+                loop {
+                    let (k, _) = self.key()?;
+                    self.expect(&Tok::Colon)?;
+                    keys.push((k, self.expr_s()?));
+                    if !self.eat(&Tok::Comma) {
+                        break;
+                    }
+                }
+                self.expect(&Tok::RBracket)?;
+                path.push(PathSeg::Select(keys));
+            } else {
+                return Ok(path);
+            }
+        }
+    }
+
+    /// `{ path: e, path +: e, -path }` after a value-level `with`.
+    fn value_patches(&mut self) -> PResult<Vec<ValuePatch>> {
+        self.expect(&Tok::LBrace)?;
+        let mut patches = Vec::new();
+        loop {
+            if self.eat(&Tok::RBrace) {
+                break;
+            }
+            let span = self.span();
+            let remove = self.eat(&Tok::Minus);
+            let path = self.patch_path()?;
+            let op = if remove {
+                ValueOp::Remove
+            } else if self.eat(&Tok::Plus) {
+                self.expect(&Tok::Colon)?;
+                ValueOp::Merge(self.expr_s()?)
+            } else {
+                self.expect(&Tok::Colon)?;
+                ValueOp::Set(self.expr_s()?)
+            };
+            patches.push(ValuePatch { path, op, span });
             if !self.eat(&Tok::Comma) {
                 self.expect(&Tok::RBrace)?;
                 break;
@@ -587,6 +653,12 @@ impl Parser {
                     };
                     e = Expr::new(ExprKind::Field(Box::new(e), label, optional), span);
                 }
+                Tok::Ident(w) if w == "with" && *self.peek_at(1) == Tok::LBrace && !self.no_struct => {
+                    let span = self.span();
+                    self.bump();
+                    let patches = self.value_patches()?;
+                    e = Expr::new(ExprKind::With(Box::new(e), patches), span);
+                }
                 Tok::LBracket => {
                     let span = e.span;
                     self.bump();
@@ -634,6 +706,15 @@ impl Parser {
                     Tok::LBrace if is_upper(&n) && !self.no_struct => {
                         let obj = self.object()?;
                         ExprKind::Typed(n, Box::new(obj))
+                    }
+                    Tok::Dot if self.qualified_call() => {
+                        let mut name = n;
+                        while self.eat(&Tok::Dot) {
+                            name.push('.');
+                            name.push_str(&self.ident()?.0);
+                        }
+                        self.expect(&Tok::LParen)?;
+                        ExprKind::Call(name, self.args()?)
                     }
                     Tok::Dot if self.qualified_struct_len().is_some() => {
                         let mut name = n;

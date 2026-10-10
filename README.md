@@ -37,6 +37,26 @@ schemas/fetch.sh 1.31
 
 `cleat gen <schema>` prints the generated Cleat types.
 
+## Shared bases and environment overlays
+
+A module holds the shared pieces; each environment imports it and patches
+the result with `with` (the role of Kustomize overlays):
+
+```ts
+// examples/overlays/prod.cleat
+import base from "./base.cleat"
+input image: Str
+
+export api = base.app("api", image) with {
+  [kind: "Deployment"].spec.replicas: 3,
+  [kind: "Deployment"].metadata.labels +: { tier: "prod" },
+  [kind: "Service"].spec.type: "LoadBalancer",
+}
+```
+
+Patches are checked against the Kubernetes types: a misspelled field, a
+value of the wrong type, or a selector that can't match is an error.
+
 ## Editor support
 
 `cleat lsp` is a Language Server (stdio) with diagnostics as you type and

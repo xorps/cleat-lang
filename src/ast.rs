@@ -168,6 +168,26 @@ pub enum ExprKind {
     If(Box<Expr>, Box<Expr>, Box<Expr>),
     Let(String, Option<Box<TypeExpr>>, Box<Expr>, Box<Expr>),
     Match(Box<Expr>, Vec<Arm>),
+    /// `e with { path: v, path +: v, -path }`
+    With(Box<Expr>, Vec<ValuePatch>),
+}
+
+/// One entry of a value-level `e with { ... }`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ValuePatch {
+    pub path: Vec<PathSeg>,
+    pub op: ValueOp,
+    pub span: Span,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum ValueOp {
+    /// `path: v`
+    Set(Expr),
+    /// `path +: v`: append to a list, or JSON-merge-patch an object.
+    Merge(Expr),
+    /// `-path`
+    Remove,
 }
 
 impl Expr {
@@ -285,6 +305,30 @@ impl Expr {
             ExprKind::Let(n, t, v, b) => {
                 ExprKind::Let(n.clone(), t.clone(), Box::new(go(v)), Box::new(b.subst_many(&without(&[n]))))
             }
+            ExprKind::With(b, patches) => ExprKind::With(
+                Box::new(go(b)),
+                patches
+                    .iter()
+                    .map(|p| ValuePatch {
+                        path: p
+                            .path
+                            .iter()
+                            .map(|s| match s {
+                                PathSeg::Select(ks) => {
+                                    PathSeg::Select(ks.iter().map(|(k, v)| (k.clone(), go(v))).collect())
+                                }
+                                s => s.clone(),
+                            })
+                            .collect(),
+                        op: match &p.op {
+                            ValueOp::Set(v) => ValueOp::Set(go(v)),
+                            ValueOp::Merge(v) => ValueOp::Merge(go(v)),
+                            ValueOp::Remove => ValueOp::Remove,
+                        },
+                        span: p.span,
+                    })
+                    .collect(),
+            ),
             ExprKind::Match(s, arms) => ExprKind::Match(
                 Box::new(go(s)),
                 arms.iter()
@@ -376,6 +420,10 @@ impl Expr {
             }
             ExprKind::Let(n, _, v, b) => write!(f, "(let {n} = {v}; {b})"),
             ExprKind::Match(s, _) => write!(f, "match {s} {{ ... }}"),
+            ExprKind::With(b, _) => {
+                b.fmt_prec(f, 9)?;
+                write!(f, " with {{ ... }}")
+            }
         }
     }
 }
@@ -486,6 +534,10 @@ pub enum PathSeg {
     Field(String),
     /// `[]`: every element of a list, or every value of a map.
     Each,
+    /// `[2]`: one list element (values only).
+    Index(usize),
+    /// `[name: "api"]`: list elements whose fields equal these values (values only).
+    Select(Vec<(String, Expr)>),
 }
 
 impl fmt::Display for PathSeg {
@@ -493,6 +545,11 @@ impl fmt::Display for PathSeg {
         match self {
             PathSeg::Field(k) => write!(f, "{}", fmt_key(k)),
             PathSeg::Each => write!(f, "[]"),
+            PathSeg::Index(i) => write!(f, "[{i}]"),
+            PathSeg::Select(keys) => {
+                let ks: Vec<String> = keys.iter().map(|(k, v)| format!("{}: {v}", fmt_key(k))).collect();
+                write!(f, "[{}]", ks.join(", "))
+            }
         }
     }
 }

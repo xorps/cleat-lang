@@ -517,3 +517,127 @@ fn refine_applies_to_every_reference() {
     let Err(ExportError::Eval(es)) = export_at(src, Some(&dir), vec![("r".into(), InputValue::Raw("7".into()))]) else { panic!() };
     assert!(es[0].msg.contains("7 does not satisfy `self <= 5`"), "{}", es[0].msg);
 }
+
+// ---- value patches: `e with { ... }` ----
+
+const DEPLOY: &str = r#"
+type Container = { name: Str, image?: Str, env?: [{ name: Str, value: Str }] }
+type Dep = { metadata: { name: Str, labels?: { [Str]: Str } }, spec: { replicas?: Int, selector: Str, containers: [Container] } }
+let base = Dep {
+  metadata: { name: "api", labels: { app: "api" } },
+  spec: { selector: "app", containers: [{ name: "api", image: "api:1", env: [{ name: "A", value: "1" }] }, { name: "proxy" }] },
+}
+"#;
+
+#[test]
+fn value_patches_apply() {
+    let out = yaml(
+        &format!(
+            "{DEPLOY}export base with {{
+  spec.replicas: 3,
+  metadata.labels +: {{ tier: \"prod\", app: null }},
+  metadata.labels.team: \"a\",
+  spec.containers[name: \"api\"].image: \"api:2\",
+  spec.containers[name: \"api\"].env +: [{{ name: \"B\", value: \"2\" }}],
+  -spec.containers[name: \"proxy\"],
+}}"
+        ),
+        &[],
+    );
+    assert_eq!(
+        out,
+        "metadata:\n  name: api\n  labels:\n    tier: prod\n    team: a\nspec:\n  selector: app\n  containers:\n    - name: api\n      image: api:2\n      env:\n        - name: A\n          value: \"1\"\n        - name: B\n          value: \"2\"\n  replicas: 3\n"
+    );
+}
+
+#[test]
+fn value_patches_are_typed_against_declared_types() {
+    err(&format!("{DEPLOY}let x = base with {{ spec.replcias: 3 }}"), "`spec.replcias`: `Dep.spec` has no field `replcias`; did you mean `replicas`?");
+    err(&format!("{DEPLOY}let x = base with {{ spec.replicas: \"3\" }}"), "expected `Int`");
+    err(&format!("{DEPLOY}let x = base with {{ spec.containers[nmae: \"api\"].image: \"x\" }}"), "have no field `nmae`; did you mean `name`?");
+    err(&format!("{DEPLOY}let x = base with {{ -spec.selector }}"), "`selector` is required in `Dep.spec` and cannot be removed");
+    err(&format!("{DEPLOY}let x = base with {{ metadata.labels +: {{ a: 1 }} }}"), "expected `Str | null`");
+    err(&format!("{DEPLOY}let x = base with {{ spec.containers.image: \"x\" }}"), "is a list; select elements");
+    // The result keeps the declared type.
+    ok(&format!("{DEPLOY}let x: Dep = base with {{ spec.replicas: 3 }}"));
+}
+
+#[test]
+fn value_patches_on_anonymous_objects_update_the_type() {
+    ok("let a = { n: 1, xs: [1] } with { n: \"one\", xs +: [2], extra.deep: true }\nlet s: Str = a.n\nlet b: Bool = a.extra.deep");
+    err("let a = { n: 1 } with { -m }", "has no field `m`");
+}
+
+#[test]
+fn value_patch_runtime_errors() {
+    let e = run("input want: Str = \"b\"\nlet b = { xs: [{ name: \"a\" }] }\nexport b with { xs[name: want].v: 1 }", &[]).unwrap_err();
+    assert!(e.contains("no element of `xs` matches `[name: \"b\"]`"), "{e}");
+    // With a literal selector the same mistake is caught statically.
+    err("let b = { xs: [{ name: \"a\" }] }\nlet c = b with { xs[name: \"b\"].v: 1 }", "can match `[name: \"b\"]`");
+    let e = run("let b = { xs: [1] }\nexport b with { xs[3]: 1 }", &[]).unwrap_err();
+    assert!(e.contains("index 3 is out of bounds"), "{e}");
+}
+
+// ---- modules with functions and constants ----
+
+const LIB: &str = r#"
+type Kind = "Deployment" | "Service"
+type Res = { kind: Kind, metadata: { name: Str, labels?: { [Str]: Str } }, spec?: { replicas?: Int, type?: "ClusterIP" | "LoadBalancer" } }
+type Name = Str where len(self) <= 5
+let team = "shop"
+fn labels(app: Str) -> { [Str]: Str } = { app, team }
+fn app(name: Name, replicas: Int = 1) -> [Res] = [
+  { kind: "Deployment", metadata: { name, labels: labels(name) }, spec.replicas: replicas },
+  { kind: "Service", metadata.name: name, spec.type: "ClusterIP" },
+]
+"#;
+
+fn module_dir(name: &str) -> PathBuf {
+    fixture_dir(name, &[("lib.cleat", LIB)])
+}
+
+#[test]
+fn modules_export_functions_constants_and_types() {
+    let dir = module_dir("mod-ok");
+    let src = "import lib from \"lib.cleat\"\nlet t: Str = lib.team\nlet r: lib.Res = { kind: \"Service\", metadata.name: \"x\" }\nexport lib.app(\"api\", replicas: 2) with {\n  [kind: \"Deployment\"].metadata.labels +: { tier: \"prod\" },\n  [kind: \"Service\"].spec.type: \"LoadBalancer\",\n}";
+    let Ok((_, comps)) = export_at(src, Some(&dir), vec![]) else { panic!("{:?}", check_source_at(src, Some(&dir)).errors) };
+    let out = emit::to_yaml_stream(&targets::plain(&comps));
+    assert_eq!(
+        out,
+        "kind: Deployment\nmetadata:\n  name: api\n  labels:\n    app: api\n    team: shop\n    tier: prod\nspec:\n  replicas: 2\n---\nkind: Service\nmetadata:\n  name: api\nspec:\n  type: LoadBalancer\n"
+    );
+}
+
+#[test]
+fn module_errors_are_reported_at_the_importer() {
+    let dir = module_dir("mod-err");
+    let errs = |body: &str| {
+        check_source_at(&format!("import lib from \"lib.cleat\"\n{body}"), Some(&dir))
+            .errors
+            .into_iter()
+            .map(|e| e.msg)
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+    assert!(errs("let a = lib.ap(\"x\")").contains("unknown function `lib.ap`; did you mean `lib.app`?"));
+    assert!(errs("let a = lib.teem").contains("module `lib` has no value `teem`; did you mean `lib.team`?"));
+    assert!(errs("let a = lib.app(\"toolong\")").contains("refinement violated"));
+    assert!(errs("let a = lib.app(\"x\") with { [kind: \"Deploymnt\"].spec.replicas: 3 }").contains("can match `[kind: \"Deploymnt\"]`"));
+    assert!(errs("let a = lib.app(\"x\") with { [kind: \"Service\"].spec.type: \"NodePort\" }").contains("type mismatch"));
+    // A selector patch on one kind leaves the other kinds patchable.
+    assert_eq!(errs("let a = lib.app(\"x\") with { [kind: \"Deployment\"].spec.replicas: 2, [kind: \"Service\"].spec.type: \"ClusterIP\" }"), "");
+
+    let dir = fixture_dir(
+        "mod-bad",
+        &[
+            ("broken.cleat", "fn f() -> Int = \"no\""),
+            ("input.cleat", "input x: Int"),
+            ("a.cleat", "import b from \"b.cleat\"\nfn f() -> Int = 1"),
+            ("b.cleat", "import a from \"a.cleat\"\nfn g() -> Int = 1"),
+        ],
+    );
+    let errs = |body: &str| check_source_at(body, Some(&dir)).errors.into_iter().map(|e| e.msg).collect::<Vec<_>>().join("\n");
+    assert!(errs("import m from \"broken.cleat\"").contains("broken.cleat:1:17: type mismatch"));
+    assert!(errs("import m from \"input.cleat\"").contains("a module cannot declare `input`s"));
+    assert!(errs("import m from \"a.cleat\"").contains("import cycle"));
+}

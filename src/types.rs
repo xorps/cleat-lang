@@ -104,6 +104,35 @@ impl Ty {
         ]
     }
 
+    /// The alias names this type mentions.
+    pub fn alias_names(&self, out: &mut Vec<String>) {
+        match self {
+            Ty::Alias(n) => out.push(n.clone()),
+            Ty::Refine(b, _) | Ty::List(b) | Ty::Map(b) => b.alias_names(out),
+            Ty::Record(r) => r.fields.iter().for_each(|f| f.ty.alias_names(out)),
+            Ty::Tuple(ts) | Ty::Union(ts) => ts.iter().for_each(|t| t.alias_names(out)),
+            _ => {}
+        }
+    }
+
+    /// Rename aliases (`f` returns the new name, or `None` to keep it).
+    pub fn map_aliases(&self, f: &impl Fn(&str) -> Option<String>) -> Ty {
+        let go = |t: &Ty| t.map_aliases(f);
+        match self {
+            Ty::Alias(n) => Ty::Alias(f(n).unwrap_or_else(|| n.clone())),
+            Ty::Refine(b, p) => Ty::Refine(Box::new(go(b)), p.clone()),
+            Ty::Record(r) => Ty::Record(Rec {
+                fields: r.fields.iter().map(|fl| Field { ty: go(&fl.ty), ..fl.clone() }).collect(),
+                open: r.open,
+            }),
+            Ty::List(t) => Ty::List(Box::new(go(t))),
+            Ty::Map(t) => Ty::Map(Box::new(go(t))),
+            Ty::Tuple(ts) => Ty::Tuple(ts.iter().map(go).collect()),
+            Ty::Union(ms) => Ty::Union(ms.iter().map(go).collect()),
+            t => t.clone(),
+        }
+    }
+
     pub fn subst_many(&self, map: &[(String, Expr)]) -> Ty {
         let go = |t: &Ty| t.subst_many(map);
         match self {
@@ -349,6 +378,9 @@ impl TypeCtx {
     /// Apply one `with` entry. Every operation narrows, so the result is a subtype of `t`.
     fn patch(&self, t: &Ty, path: &[PathSeg], op: &Op) -> Result<Ty, String> {
         let Some((seg, rest)) = path.split_first() else { return self.patch_here(t, op) };
+        if matches!(seg, PathSeg::Index(_) | PathSeg::Select(_)) {
+            return Err(format!("`{seg}` selects values; in a type, use `[]` for all elements"));
+        }
         let shown = self.norm(t);
         match self.unfold(&shown) {
             // Optional values: refine the non-null part.
@@ -420,7 +452,9 @@ impl TypeCtx {
         let [only] = non_null.as_slice() else { return None };
         match (self.shape(only), seg) {
             (Ty::Record(r), PathSeg::Field(k)) => self.type_at(&r.get(k)?.ty, rest),
-            (Ty::List(e), PathSeg::Each) | (Ty::Map(e), PathSeg::Each) => self.type_at(&e, rest),
+            (Ty::List(e), PathSeg::Each | PathSeg::Index(_) | PathSeg::Select(_)) | (Ty::Map(e), PathSeg::Each) => {
+                self.type_at(&e, rest)
+            }
             _ => None,
         }
     }
