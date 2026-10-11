@@ -1,4 +1,14 @@
-# Cleat
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="assets/logo-dark.svg">
+    <img alt="Cleat" src="assets/logo.svg" width="440">
+  </picture>
+</p>
+
+> [!WARNING]
+> **Cleat is under active development.** The language, the CLI and the
+> editor and Argo CD integrations can change in incompatible ways between
+> commits, and it hasn't been used in production yet.
 
 A typed configuration language whose values are exactly JSON, aimed at
 replacing Helm and Kustomize for Kubernetes. It has structural,
