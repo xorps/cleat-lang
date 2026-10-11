@@ -48,6 +48,9 @@ cp "$repo"/assets/*.svg "$out/assets/"
 cp "$repo"/site/playground/index.html "$repo"/site/playground/playground.css "$repo"/site/playground/playground.js \
   "$repo"/site/playground/basics.cleat "$pg/"
 cp "$repo/target/wasm32-unknown-unknown/wasm/cleat_wasm.wasm" "$pg/cleat.wasm"
+# The resource view: the same page `cleat view` serves, embedded by the playground.
+mkdir -p "$pg/view"
+cp "$repo"/crates/cleat/src/view/index.html "$repo"/crates/cleat/src/view/view.css "$repo"/crates/cleat/src/view/view.js "$pg/view/"
 cp "$repo/examples/quickstart.cleat" "$repo/examples/webapp.cleat" "$pg/examples/"
 cp "$repo/examples/overlays/base.cleat" "$repo/examples/overlays/prod.cleat" "$pg/examples/overlays/"
 cp "$repo/schemas/$schema" "$pg/schemas/"

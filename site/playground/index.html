@@ -54,10 +54,16 @@
         <div id="inputs"></div>
       </div>
       <div class="output-head">
-        <h2>Output</h2>
+        <div class="seg" role="tablist" aria-label="Output view">
+          <button id="tab-yaml" type="button" role="tab" aria-selected="true" aria-controls="output">YAML</button>
+          <button id="tab-res" type="button" role="tab" aria-selected="false" aria-controls="resview">Resources</button>
+        </div>
+        <span class="spacer"></span>
+        <button id="popout" type="button" hidden title="The resource view in its own tab, updating as you type">Open in new tab</button>
         <button id="copy" type="button">Copy</button>
       </div>
-      <pre id="output" class="output"></pre>
+      <pre id="output" class="output" role="tabpanel"></pre>
+      <iframe id="resview" class="resview" title="Resources: a map and tables of the output" hidden></iframe>
     </section>
   </main>
 

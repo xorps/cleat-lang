@@ -54,6 +54,38 @@ fn ordered(comps: &[Component]) -> Vec<(i64, &Component)> {
     v
 }
 
+/// What `cleat view` and the playground draw: the components in wave order
+/// (`name`, `after`, `wave`) and every output document with its component,
+/// wave and YAML, as the `plain` or `argocd` target renders it.
+pub fn view_data(comps: &[Component], target: &str) -> Result<(Value, Value), String> {
+    let docs = match target {
+        "argocd" => argocd(comps)?,
+        _ => plain(comps),
+    };
+    let s = |x: &str| Value::Str(x.to_string());
+    let obj = |pairs: Vec<(&str, Value)>| Value::Obj(pairs.into_iter().map(|(k, v)| (k.to_string(), v)).collect());
+    let mut docs = docs.into_iter();
+    let (mut components, mut resources) = (Vec::new(), Vec::new());
+    // Both targets emit each component's documents together, in this order.
+    for (wave, c) in ordered(comps) {
+        let name = comp_name(c);
+        components.push(obj(vec![
+            ("name", s(name)),
+            ("after", Value::List(c.after.iter().map(|a| s(a)).collect())),
+            ("wave", Value::Int(wave)),
+        ]));
+        for doc in docs.by_ref().take(c.docs.len()) {
+            resources.push(obj(vec![
+                ("component", s(name)),
+                ("wave", Value::Int(wave)),
+                ("yaml", s(&emit::to_yaml(&doc))),
+                ("doc", doc),
+            ]));
+        }
+    }
+    Ok((Value::List(components), Value::List(resources)))
+}
+
 pub fn plain(comps: &[Component]) -> Vec<Value> {
     ordered(comps).into_iter().flat_map(|(_, c)| c.docs.clone()).collect()
 }

@@ -129,49 +129,13 @@ pub fn state(cfg: &ViewConfig, ui_inputs: Option<Vec<(String, String)>>) -> Valu
                 "warnings",
                 Value::List(outcome.warnings.iter().map(|d| diag(d.span, &d.msg)).collect()),
             ));
-            let docs = match cfg.target.as_str() {
-                "argocd" => targets::argocd(&comps),
-                _ => Ok(targets::plain(&comps)),
-            };
-            let docs = match docs {
-                Ok(d) => d,
-                Err(e) => {
-                    out.push(("errors", Value::List(vec![obj(vec![("msg", s(&e))])])));
-                    return obj(out);
+            match targets::view_data(&comps, &cfg.target) {
+                Ok((components, resources)) => {
+                    out.push(("components", components));
+                    out.push(("resources", resources));
                 }
-            };
-            // `plain` and `argocd` keep the documents of each component together, in wave order.
-            let waves = targets::waves(&comps);
-            let mut order: Vec<usize> = (0..comps.len()).collect();
-            order.sort_by_key(|&i| waves[i]);
-            let mut resources = Vec::new();
-            let mut docs = docs.into_iter();
-            for &i in &order {
-                let c = &comps[i];
-                let comp = c.name.clone().unwrap_or_else(|| "default".into());
-                for _ in &c.docs {
-                    let Some(doc) = docs.next() else { break };
-                    resources.push(obj(vec![
-                        ("component", s(&comp)),
-                        ("wave", Value::Int(waves[i])),
-                        ("yaml", s(&emit::to_yaml(&doc))),
-                        ("doc", doc),
-                    ]));
-                }
+                Err(e) => out.push(("errors", Value::List(vec![obj(vec![("msg", s(&e))])]))),
             }
-            let components = order
-                .iter()
-                .map(|&i| {
-                    let c = &comps[i];
-                    obj(vec![
-                        ("name", s(c.name.as_deref().unwrap_or("default"))),
-                        ("after", Value::List(c.after.iter().map(|a| s(a)).collect())),
-                        ("wave", Value::Int(waves[i])),
-                    ])
-                })
-                .collect();
-            out.push(("components", Value::List(components)));
-            out.push(("resources", Value::List(resources)));
         }
     }
     obj(out)

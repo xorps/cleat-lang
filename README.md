@@ -117,7 +117,8 @@ quickstart.cleat:8:1: error: input `replicas`: 0 does not satisfy `self >= 1`
 
 To try it without installing anything, use the
 [playground](https://xorps.github.io/cleat-lang/playground/): the real
-checker compiled to WebAssembly, with completion, hover and live output.
+checker compiled to WebAssembly, with completion, hover, live output, and the
+same resource map and checks as `cleat view`.
 
 Cleat is built from source for now (Rust is installed by `rustup` from
 `rust-toolchain.toml`):
