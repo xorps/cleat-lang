@@ -72,6 +72,7 @@ Paths below are in `crates/cleat-core/src/` unless they say otherwise.
 | `crates/cleat/src/lib.rs` | The `Path`-based API on a per-thread `FsHost` session |
 | `crates/cleat/src/yaml.rs` | YAML input (CRDs, data imports, inputs files) |
 | `crates/cleat/src/lsp.rs` | Language server (stdio JSON-RPC, no LSP crate) |
+| `crates/cleat/src/view.rs`, `view/` | `cleat view`: a small localhost server (and `--out` snapshots) for the dashboard page in `view/` (plain HTML/CSS/JS, embedded with `include_str!`) |
 | `crates/cleat/src/main.rs` | CLI, including `cleat argocd generate|params` for the Argo CD plugin |
 | `crates/cleat-wasm/src/lib.rs` | The playground's WebAssembly interface: one JSON-in, JSON-out call over a `MemHost` |
 | `site/playground/` | The playground page: editor, highlighting, hover, completion, inputs, share links |

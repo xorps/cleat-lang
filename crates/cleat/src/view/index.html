@@ -1,0 +1,35 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Cleat View</title>
+  <link rel="stylesheet" href="view.css">
+</head>
+<body>
+  <header class="top">
+    <div class="brand"><span class="logo" aria-hidden="true">◆</span> Cleat <span class="tag">view</span></div>
+    <div class="file" id="file"></div>
+    <span class="spacer"></span>
+    <select id="ns" aria-label="Namespace"></select>
+    <input id="search" type="search" placeholder="Filter by name or label" aria-label="Filter">
+    <button id="inputs-toggle" type="button" aria-expanded="false" aria-controls="inputs-panel">Inputs</button>
+    <span id="status" class="status" role="status"></span>
+  </header>
+
+  <section id="inputs-panel" class="inputs-panel" hidden aria-label="Inputs">
+    <div id="inputs" class="inputs-grid"></div>
+    <p id="inputs-note" class="muted"></p>
+  </section>
+
+  <div id="banner" class="banner" hidden role="alert"></div>
+
+  <div class="layout">
+    <nav id="nav" class="nav" aria-label="Resources"></nav>
+    <main id="main" class="main"></main>
+    <aside id="detail" class="detail" hidden aria-label="Resource details"></aside>
+  </div>
+
+  <script src="view.js"></script>
+</body>
+</html>

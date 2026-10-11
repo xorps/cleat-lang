@@ -7,6 +7,7 @@
 
 pub mod fs;
 pub mod lsp;
+pub mod view;
 pub mod yaml;
 
 use std::path::Path;

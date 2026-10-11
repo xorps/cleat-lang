@@ -8,6 +8,7 @@ const USAGE: &str = "\
 usage:
   cleat check  <file.cleat> [--vcs]
   cleat export <file.cleat> [options]
+  cleat view   <file.cleat>  the exported resources in a browser, live
   cleat gen <schema>         print Cleat types for an OpenAPI document or CRD file
   cleat lsp                  language server on stdio (used by editors)
   cleat argocd generate      Argo CD plugin: export $ARGOCD_ENV_CLEAT_FILE (default main.cleat)
@@ -28,7 +29,12 @@ export options:
   --flux-source <name>     GitRepository name (flux; required)
   --flux-path <path>       repository path of --out (flux; default: .)
   --flux-namespace <ns>    namespace for Kustomizations (flux; default: flux-system)
-  --flux-prefix <prefix>   prefix for Kustomization names (flux)";
+  --flux-prefix <prefix>   prefix for Kustomization names (flux)
+
+view options (also: --input, --set, --target plain|argocd):
+  --port <n>               port on 127.0.0.1 (default: any free port)
+  --no-open                don't open a browser
+  --out <file.html>        write a self-contained snapshot instead of serving";
 
 struct Opts {
     file: String,
@@ -42,6 +48,8 @@ struct Opts {
     json: bool,
     out: Option<String>,
     flux: FluxOptions,
+    port: u16,
+    open: bool,
 }
 
 fn main() -> ExitCode {
@@ -126,6 +134,7 @@ fn main() -> ExitCode {
     match cmd.as_str() {
         "check" => check(&opts, &src),
         "export" => export(opts, &src),
+        "view" => view(opts),
         _ => {
             eprintln!("{USAGE}");
             ExitCode::from(2)
@@ -150,6 +159,8 @@ fn parse_opts(args: &[String]) -> Result<Opts, String> {
             prefix: String::new(),
             interval: "10m".into(),
         },
+        port: 0,
+        open: true,
     };
     let mut it = args.iter();
     while let Some(a) = it.next() {
@@ -177,6 +188,8 @@ fn parse_opts(args: &[String]) -> Result<Opts, String> {
             "--flux-path" => o.flux.path = val()?,
             "--flux-namespace" => o.flux.namespace = val()?,
             "--flux-prefix" => o.flux.prefix = val()?,
+            "--port" => o.port = val()?.parse().map_err(|_| "--port expects a port number".to_string())?,
+            "--no-open" => o.open = false,
             s if s.starts_with("--") => return Err(format!("unknown option {s}")),
             s if o.file.is_empty() => o.file = s.to_string(),
             s => return Err(format!("unexpected argument {s}")),
@@ -324,6 +337,62 @@ fn export(opts: Opts, src: &str) -> ExitCode {
     ExitCode::SUCCESS
 }
 
+fn view(opts: Opts) -> ExitCode {
+    if !matches!(opts.target.as_str(), "plain" | "argocd") {
+        eprintln!("error: cleat view supports --target plain or argocd");
+        return ExitCode::from(2);
+    }
+    let root = project_root(&opts);
+    let cfg = cleat::view::ViewConfig {
+        file: std::path::PathBuf::from(&opts.file),
+        root,
+        inputs: opts.inputs,
+        target: opts.target,
+    };
+    if let Some(out) = &opts.out {
+        return match std::fs::write(out, cleat::view::snapshot(&cfg)) {
+            Ok(()) => {
+                eprintln!("wrote {out}");
+                ExitCode::SUCCESS
+            }
+            Err(e) => {
+                eprintln!("error: cannot write {out}: {e}");
+                ExitCode::FAILURE
+            }
+        };
+    }
+    let open = opts.open;
+    let res = cleat::view::serve(&cfg, opts.port, |url| {
+        eprintln!("Viewing {} at {url} (Ctrl-C to stop)", opts.file);
+        if open {
+            open_browser(url);
+        }
+    });
+    match res {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(e) => {
+            eprintln!("error: cannot serve: {e}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+/// Best effort: the URL is printed either way.
+fn open_browser(url: &str) {
+    let cmd = if cfg!(target_os = "macos") {
+        "open"
+    } else if cfg!(windows) {
+        "explorer"
+    } else {
+        "xdg-open"
+    };
+    let _ = std::process::Command::new(cmd)
+        .arg(url)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn();
+}
+
 fn base_dir(file: &str) -> Option<std::path::PathBuf> {
     std::path::Path::new(file).parent().map(|p| {
         if p.as_os_str().is_empty() {
@@ -376,6 +445,8 @@ fn argocd(sub: Option<&str>) -> ExitCode {
                     prefix: String::new(),
                     interval: "10m".into(),
                 },
+                port: 0,
+                open: false,
             };
             export(opts, &src)
         }
