@@ -1,0 +1,72 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Cleat Playground</title>
+  <meta name="description" content="Try Cleat, a typed configuration language for Kubernetes, in your browser.">
+  <link rel="icon" href="../assets/icon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="playground.css">
+</head>
+<body>
+  <header class="bar">
+    <a class="brand" href="../">
+      <img src="../assets/icon.svg" alt="" width="26" height="26">
+      <span>Cleat</span><span class="tag">Playground</span>
+    </a>
+    <label class="field">
+      <span>Example</span>
+      <select id="example"></select>
+    </label>
+    <label class="field">
+      <span>Output</span>
+      <select id="target">
+        <option value="plain">Plain YAML</option>
+        <option value="argocd">Argo CD (sync waves)</option>
+      </select>
+    </label>
+    <span class="spacer"></span>
+    <span id="status" class="status" role="status">Loading…</span>
+    <button id="share" type="button" title="Copy a link to this code">Share</button>
+    <a class="link" href="../">Docs</a>
+    <a class="link" href="https://github.com/xorps/cleat-lang">GitHub</a>
+  </header>
+
+  <main class="panes">
+    <section class="pane source" aria-label="Source">
+      <nav id="files" class="tabs" aria-label="Files"></nav>
+      <div class="editor" id="editor">
+        <div class="gutter" aria-hidden="true"><div id="lines"></div></div>
+        <div class="code">
+          <pre class="layer hl" id="hl" aria-hidden="true"></pre>
+          <pre class="layer marks" id="marks" aria-hidden="true"></pre>
+          <textarea id="text" spellcheck="false" autocapitalize="off" autocomplete="off" wrap="off"
+                    aria-label="Cleat source"></textarea>
+        </div>
+        <span class="measure" id="measure" aria-hidden="true">xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx</span>
+      </div>
+      <div id="problems" class="problems" aria-label="Problems" aria-live="polite"></div>
+    </section>
+
+    <section class="pane result" aria-label="Result">
+      <div id="inputs-box" class="inputs">
+        <h2>Inputs</h2>
+        <div id="inputs"></div>
+      </div>
+      <div class="output-head">
+        <h2>Output</h2>
+        <button id="copy" type="button">Copy</button>
+      </div>
+      <pre id="output" class="output"></pre>
+    </section>
+  </main>
+
+  <div id="tip" class="tip" hidden></div>
+  <div id="complete" class="complete" hidden role="listbox" aria-label="Completions">
+    <ul id="complete-list"></ul>
+    <div id="complete-doc" class="complete-doc"></div>
+  </div>
+
+  <script type="module" src="playground.js"></script>
+</body>
+</html>

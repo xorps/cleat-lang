@@ -1,0 +1,46 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="2 -12 150 150" role="img" aria-label="Cleat">
+  <!-- The mark from logo.svg, without the wordmark: for favicons and small spaces. -->
+  <defs>
+    <linearGradient id="metal" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#2A5C91"/>
+      <stop offset="1" stop-color="#0B2545"/>
+    </linearGradient>
+    <linearGradient id="rope" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#35EBC6"/>
+      <stop offset="1" stop-color="#0E9F83"/>
+    </linearGradient>
+  </defs>
+
+  <g transform="translate(8 10)">
+    <!-- base plate and neck -->
+    <path d="M58 52 L84 52 L94 76 L48 76 Z" fill="url(#metal)"/>
+    <rect x="34" y="74" width="74" height="12" rx="6" fill="url(#metal)"/>
+    <circle cx="46" cy="80" r="2.8" fill="#9CC3EA"/>
+    <circle cx="96" cy="80" r="2.8" fill="#9CC3EA"/>
+
+    <!-- wraps that pass under the horns (drawn first, the horns cover them) -->
+    <g fill="none" stroke-linecap="round" stroke="url(#rope)" stroke-width="7">
+      <path id="wrapL" d="M36 26 C 14 24, 8 52, 34 58"/>
+      <path id="wrapR" d="M106 26 C 128 24, 134 52, 108 58"/>
+    </g>
+    <use href="#wrapL" stroke="#0A6352" stroke-width="7" stroke-dasharray="2.2 4.6" opacity="0.5" fill="none"/>
+    <use href="#wrapR" stroke="#0A6352" stroke-width="7" stroke-dasharray="2.2 4.6" opacity="0.5" fill="none"/>
+
+    <!-- horns -->
+    <path d="M6 38 C 4 33, 9 31, 14 33 C 30 36, 48 33, 71 33 C 94 33, 112 36, 128 33
+             C 133 31, 138 33, 136 38 C 133 45, 124 48, 112 48 C 98 48, 86 49, 71 49
+             C 56 49, 44 48, 30 48 C 18 48, 9 45, 6 38 Z" fill="url(#metal)"/>
+    <path d="M18 37 C 36 39, 52 37, 71 37 C 90 37, 106 39, 124 37"
+          fill="none" stroke="#9CC3EA" stroke-width="2" stroke-linecap="round" opacity="0.6"/>
+
+    <!-- the crossing turns of the hitch, over the top, and the standing part -->
+    <g fill="none" stroke-linecap="round" stroke="url(#rope)" stroke-width="7">
+      <path id="crossA" d="M36 26 C 60 30, 84 50, 108 58"/>
+      <path id="crossB" d="M34 58 C 58 50, 82 30, 106 26"/>
+      <path id="tail" d="M34 58 C 26 64, 14 70, 2 72"/>
+    </g>
+    <use href="#crossA" stroke="#0A6352" stroke-width="7" stroke-dasharray="2.2 4.6" opacity="0.5" fill="none"/>
+    <use href="#crossB" stroke="#0A6352" stroke-width="7" stroke-dasharray="2.2 4.6" opacity="0.5" fill="none"/>
+    <use href="#tail" stroke="#0A6352" stroke-width="7" stroke-dasharray="2.2 4.6" opacity="0.5" fill="none"/>
+  </g>
+</svg>

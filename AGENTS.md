@@ -10,6 +10,9 @@ a dependency-free VS Code extension and an Argo CD plugin:
   and no I/O: files are read through a `Host` the application supplies.
 - `crates/cleat`: the `cleat` binary and library on a real file system (CLI,
   language server, Argo CD plugin). Its `FsHost` reads files and parses YAML.
+- `crates/cleat-wasm`: the core compiled to WebAssembly for the browser
+  playground, with files held in memory.
+- `site/playground`: the playground page (plain HTML/CSS/JS, no build step).
 
 [SPEC.md](SPEC.md) is the source of truth for language behavior; read the
 relevant section before changing semantics.
@@ -62,6 +65,8 @@ Paths below are in `crates/cleat-core/src/` unless they say otherwise.
 | `crates/cleat/src/yaml.rs` | YAML input (CRDs, data imports, inputs files) |
 | `crates/cleat/src/lsp.rs` | Language server (stdio JSON-RPC, no LSP crate) |
 | `crates/cleat/src/main.rs` | CLI, including `cleat argocd generate|params` for the Argo CD plugin |
+| `crates/cleat-wasm/src/lib.rs` | The playground's WebAssembly interface: one JSON-in, JSON-out call over a `MemHost` |
+| `site/playground/` | The playground page: editor, highlighting, hover, completion, inputs, share links |
 | `editors/vscode/` | Extension: TextMate grammar, a small LSP client, live preview |
 | `deploy/argocd/` | Plugin config, distroless sidecar Dockerfile, repo-server patch, e2e test |
 
@@ -161,7 +166,8 @@ Add a test for every bug fix.
 
 Today the core uses `alloc`'s global allocator (`Vec`, `String`, `BTreeMap`,
 `Rc`) and aborts on allocation failure, like most Rust code. Each final
-binary chooses the allocator; the CLI uses the system one.
+binary chooses the allocator: the CLI uses the system one, and the
+WebAssembly build uses Rust's default for `wasm32`.
 
 The direction, to revisit later, is explicit and fallible allocation that
 works on stable Rust without extra crates:
