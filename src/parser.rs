@@ -213,13 +213,59 @@ impl Parser {
         match self.peek() {
             Tok::Import => {
                 self.bump();
-                let (name, _) = self.ident()?;
-                if !self.eat(&Tok::Ident("from".into())) {
+                let kw = |w: &str| Tok::Ident(w.to_string());
+                let form = if self.eat(&Tok::Star) {
+                    if !self.eat(&kw("as")) {
+                        return self.err("`as` (as in `import * as name from ...`)");
+                    }
+                    ImportForm::Namespace(self.ident()?.0)
+                } else if self.eat(&Tok::LBrace) {
+                    let mut names = Vec::new();
+                    loop {
+                        if self.eat(&Tok::RBrace) {
+                            break;
+                        }
+                        let sp = self.span();
+                        let orig = self.dotted_ident()?;
+                        let local = if self.eat(&kw("as")) {
+                            self.ident()?.0
+                        } else {
+                            orig.rsplit('.').next().unwrap_or(&orig).to_string()
+                        };
+                        names.push((orig, local, sp));
+                        if !self.eat(&Tok::Comma) {
+                            self.expect(&Tok::RBrace)?;
+                            break;
+                        }
+                    }
+                    ImportForm::Named(names)
+                } else {
+                    ImportForm::Default(self.ident()?.0)
+                };
+                if !self.eat(&kw("from")) {
                     return self.err("`from`");
                 }
                 let Some(path) = self.plain_str() else { return self.err("a file path string") };
                 self.bump();
-                Ok(Item::Import { name, path, span })
+                let mut attrs = Vec::new();
+                if self.eat(&kw("with")) {
+                    self.expect(&Tok::LBrace)?;
+                    loop {
+                        if self.eat(&Tok::RBrace) {
+                            break;
+                        }
+                        let (k, sp) = self.key()?;
+                        self.expect(&Tok::Colon)?;
+                        let Some(v) = self.plain_str() else { return self.err("a string attribute value") };
+                        self.bump();
+                        attrs.push((k, v, sp));
+                        if !self.eat(&Tok::Comma) {
+                            self.expect(&Tok::RBrace)?;
+                            break;
+                        }
+                    }
+                }
+                Ok(Item::Import { form, path, attrs, span })
             }
             Tok::Ident(r) if r == "refine" && matches!(self.peek_at(1), Tok::Ident(_)) => {
                 self.bump();

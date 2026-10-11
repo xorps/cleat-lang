@@ -83,3 +83,36 @@ fn load_uncached(path: &Path) -> Result<Module, String> {
     }
     Ok(Module { items, docs, is_source })
 }
+
+/// The value of `import x from "path" with { type: kind }`.
+pub fn load_data(path: &Path, kind: &str) -> Result<crate::Value, String> {
+    let text = std::fs::read_to_string(path).map_err(|e| format!("cannot read `{}`: {e}", path.display()))?;
+    let at = |e: String| format!("`{}`: {e}", path.display());
+    match kind {
+        "text" => Ok(crate::Value::Str(text)),
+        "json" => json::parse(&text).map_err(at),
+        "yaml" => {
+            let mut docs = yaml::parse_docs(&text).map_err(at)?;
+            Ok(if docs.len() == 1 { docs.pop().unwrap() } else { crate::Value::List(docs) })
+        }
+        other => Err(format!("unsupported import type `{other}` (expected \"json\", \"yaml\" or \"text\")")),
+    }
+}
+
+/// The namespace a named import (`import { A } from "path"`) is loaded under:
+/// the file name as an identifier (`kubernetes-1.31.json` -> `kubernetes_1_31`).
+pub fn hidden_namespace(path: &str, taken: impl Fn(&str) -> bool) -> String {
+    let file = Path::new(path).file_name().and_then(|f| f.to_str()).unwrap_or("module");
+    let stem = file.rsplit_once('.').map_or(file, |(stem, _ext)| stem);
+    let mut base: String = stem.chars().map(|c| if c.is_ascii_alphanumeric() { c } else { '_' }).collect();
+    if base.is_empty() || base.starts_with(|c: char| c.is_ascii_digit()) {
+        base.insert(0, '_');
+    }
+    let mut name = base.clone();
+    let mut i = 2;
+    while taken(&name) {
+        name = format!("{base}_{i}");
+        i += 1;
+    }
+    name
+}

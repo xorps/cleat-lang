@@ -170,7 +170,7 @@ struct Checker {
     /// Names for anonymous nested types in messages (`Svc.spec.ports[]`), keyed by
     /// the span of the literal they describe.
     labels: Vec<(Span, String)>,
-    /// Imported namespaces (`import ns from ...`).
+    /// Imported namespaces (`import * as ns from ...`).
     namespaces: HashSet<String>,
     /// Top-level `let`s and `input`s, offered to importers.
     global_names: Vec<String>,
@@ -276,6 +276,108 @@ impl Checker {
             span,
         };
         self.ctx.alias_src.insert(name.to_string(), te);
+    }
+
+    /// The three ES import forms (SPEC §4.1).
+    fn import_item(&mut self, form: &ImportForm, path: &str, attrs: &[(String, String, Span)], span: Span) {
+        for (k, _, sp) in attrs {
+            if k != "type" {
+                self.error(*sp, format!("unsupported import attribute `{k}` (only `type` is supported)"));
+            }
+        }
+        let ty_attr = attrs.iter().find(|(k, _, _)| k == "type");
+        match (form, ty_attr) {
+            (ImportForm::Namespace(_) | ImportForm::Named(_), Some((_, t, sp))) => self.error(
+                *sp,
+                format!(
+                    "`type: \"{t}\"` reads a file as a value; use a default import (`import x from \"{path}\" with {{ type: \"{t}\" }}`)"
+                ),
+            ),
+            (ImportForm::Namespace(ns), None) => self.import(ns, path, span),
+            (ImportForm::Named(names), None) => {
+                let hidden = crate::modules::hidden_namespace(path, |n| self.namespaces.contains(n));
+                self.import(&hidden, path, span);
+                for (orig, local, sp) in names {
+                    self.bind_named(&hidden, path, orig, local, *sp);
+                }
+            }
+            (ImportForm::Default(x), None) => self.error(
+                span,
+                format!(
+                    "`import {x} from \"{path}\"` needs `with {{ type: \"json\" | \"yaml\" | \"text\" }}`; \
+                     for a schema or module use `import * as {x} from ...` or `import {{ ... }} from ...`"
+                ),
+            ),
+            (ImportForm::Default(x), Some((_, kind, sp))) => {
+                let full = match &self.base {
+                    Some(b) => b.join(path),
+                    None => PathBuf::from(path),
+                };
+                if !["json", "yaml", "text"].contains(&kind.as_str()) {
+                    return self.error(*sp, format!("unsupported import type `{kind}` (expected \"json\", \"yaml\" or \"text\")"));
+                }
+                match crate::modules::load_data(&full, kind) {
+                    Ok(v) => {
+                        let t = value_type(&v);
+                        self.bind_var(x, t, span);
+                        self.global_names.push(x.clone());
+                    }
+                    Err(e) => self.error(span, format!("import `{x}`: {e}")),
+                }
+            }
+        }
+    }
+
+    /// `import { orig as local }`: bind a type, function and/or constant from `hidden.orig`.
+    fn bind_named(&mut self, hidden: &str, path: &str, orig: &str, local: &str, sp: Span) {
+        let q = format!("{hidden}.{orig}");
+        let mut found = false;
+        if self.ctx.alias_src.contains_key(&q) {
+            if BUILTIN_TYPES.contains(&local) || self.ctx.alias_src.contains_key(local) {
+                self.error(sp, format!("type `{local}` is already defined"));
+            } else {
+                self.ctx.alias_src.insert(local.to_string(), TypeExpr { kind: TypeKind::Named(q.clone()), span: sp });
+            }
+            found = true;
+        }
+        if let Some(sig) = self.fns.get(&q).cloned() {
+            self.fns.insert(local.to_string(), sig);
+            found = true;
+        }
+        if let Some(t) = self.lookup(&q).cloned() {
+            self.scope.push((local.to_string(), t));
+            self.global_names.push(local.to_string());
+            found = true;
+        }
+        if found {
+            return;
+        }
+        let prefix = format!("{hidden}.");
+        let short = orig.rsplit('.').next().unwrap_or(orig);
+        let mut qualified: Vec<String> = self
+            .ctx
+            .alias_src
+            .keys()
+            .filter(|k| k.starts_with(&prefix) && k.ends_with(&format!(".{short}")))
+            .map(|k| k[prefix.len()..].to_string())
+            .collect();
+        qualified.sort();
+        let msg = if !qualified.is_empty() {
+            let list: Vec<String> = qualified.iter().take(6).map(|c| format!("`{c}`")).collect();
+            format!(
+                "`{orig}` is ambiguous in `{path}`; import one of {} (e.g. `{{ {} as {short} }}`)",
+                list.join(", "),
+                qualified[0]
+            )
+        } else {
+            let mut names: Vec<String> = self.ctx.alias_src.keys().filter(|k| k.starts_with(&prefix)).cloned().collect();
+            names.extend(self.fns.keys().filter(|k| k.starts_with(&prefix)).cloned());
+            names.extend(self.scope.iter().map(|(n, _)| n.clone()).filter(|k| k.starts_with(&prefix)));
+            let local_names: Vec<&str> = names.iter().map(|n| &n[prefix.len()..]).collect();
+            let hint = did_you_mean(orig, local_names.into_iter());
+            format!("`{path}` has no export `{orig}`{hint}")
+        };
+        self.error(sp, msg);
     }
 
     /// Register an imported module's types as `ns.T`.
@@ -401,8 +503,8 @@ impl Checker {
 
     fn run(&mut self, items: &[Item]) {
         for item in items {
-            if let Item::Import { name, path, span } = item {
-                self.import(name, path, *span);
+            if let Item::Import { form, path, attrs, span } = item {
+                self.import_item(form, path, attrs, *span);
             }
         }
         for item in items {
@@ -2417,5 +2519,29 @@ pub fn qualified_name(e: &Expr) -> Option<String> {
         ExprKind::Var(n) => Some(n.clone()),
         ExprKind::Field(b, Label::Name(k), false) => qualified_name(b).map(|q| format!("{q}.{k}")),
         _ => None,
+    }
+}
+
+/// The type of imported data: objects become exact records, scalars are widened
+/// (`"a"` is `Str`), lists hold the union of their elements.
+pub fn value_type(v: &crate::Value) -> Ty {
+    use crate::Value as V;
+    match v {
+        V::Null => Ty::null(),
+        V::Bool(_) => Ty::Bool,
+        V::Int(_) => Ty::Int,
+        V::Float(_) => Ty::Float,
+        V::Str(_) => Ty::Str,
+        V::List(xs) => {
+            let ctx = TypeCtx::default();
+            Ty::List(Box::new(ctx.union(xs.iter().map(value_type).collect())))
+        }
+        V::Obj(es) => Ty::Record(Rec {
+            fields: es
+                .iter()
+                .map(|(k, x)| Field { name: k.clone(), ty: value_type(x), presence: Presence::Required })
+                .collect(),
+            open: false,
+        }),
     }
 }

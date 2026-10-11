@@ -137,50 +137,114 @@
       "name": "keyword.operator.cleat"
     },
     "string": {
-      "begin": "\"",
-      "end": "\"",
-      "name": "string.quoted.double.cleat",
       "patterns": [
         {
-          "begin": "\\\\\\(",
-          "end": "\\)",
-          "beginCaptures": {
-            "0": {
-              "name": "punctuation.section.interpolation.begin.cleat"
-            }
-          },
-          "endCaptures": {
-            "0": {
-              "name": "punctuation.section.interpolation.end.cleat"
-            }
-          },
-          "name": "meta.interpolation.cleat",
-          "contentName": "source.cleat",
+          "begin": "\"\"\"",
+          "end": "\"\"\"",
+          "name": "string.quoted.triple.cleat",
           "patterns": [
             {
-              "include": "$self"
+              "begin": "\\\\\\(",
+              "end": "\\)",
+              "beginCaptures": {
+                "0": {
+                  "name": "punctuation.section.interpolation.begin.cleat"
+                }
+              },
+              "endCaptures": {
+                "0": {
+                  "name": "punctuation.section.interpolation.end.cleat"
+                }
+              },
+              "name": "meta.interpolation.cleat",
+              "contentName": "source.cleat",
+              "patterns": [
+                {
+                  "include": "$self"
+                }
+              ]
+            },
+            {
+              "match": "\\\\[ntr\"\\\\]",
+              "name": "constant.character.escape.cleat"
             }
           ]
         },
         {
-          "match": "\\\\[ntr\"\\\\]",
-          "name": "constant.character.escape.cleat"
+          "begin": "\"",
+          "end": "\"",
+          "name": "string.quoted.double.cleat",
+          "patterns": [
+            {
+              "begin": "\\\\\\(",
+              "end": "\\)",
+              "beginCaptures": {
+                "0": {
+                  "name": "punctuation.section.interpolation.begin.cleat"
+                }
+              },
+              "endCaptures": {
+                "0": {
+                  "name": "punctuation.section.interpolation.end.cleat"
+                }
+              },
+              "name": "meta.interpolation.cleat",
+              "contentName": "source.cleat",
+              "patterns": [
+                {
+                  "include": "$self"
+                }
+              ]
+            },
+            {
+              "match": "\\\\[ntr\"\\\\]",
+              "name": "constant.character.escape.cleat"
+            }
+          ]
         }
       ]
     },
     "import": {
-      "match": "\\b(import)\\s+([A-Za-z_][A-Za-z0-9_]*)\\s+(from)\\b",
-      "captures": {
-        "1": {
-          "name": "keyword.control.import.cleat"
+      "patterns": [
+        {
+          "match": "\\b(import)\\s+(\\*)\\s+(as)\\s+([A-Za-z_][A-Za-z0-9_]*)\\s+(from)\\b",
+          "captures": {
+            "1": {
+              "name": "keyword.control.import.cleat"
+            },
+            "2": {
+              "name": "keyword.operator.cleat"
+            },
+            "3": {
+              "name": "keyword.control.import.cleat"
+            },
+            "4": {
+              "name": "entity.name.namespace.cleat"
+            },
+            "5": {
+              "name": "keyword.control.import.cleat"
+            }
+          }
         },
-        "2": {
-          "name": "entity.name.namespace.cleat"
+        {
+          "match": "\\b(import)\\s+([A-Za-z_][A-Za-z0-9_]*)\\s+(from)\\b",
+          "captures": {
+            "1": {
+              "name": "keyword.control.import.cleat"
+            },
+            "2": {
+              "name": "variable.other.constant.cleat"
+            },
+            "3": {
+              "name": "keyword.control.import.cleat"
+            }
+          }
         },
-        "3": {
+        {
+          "match": "\\b(from|as)\\b(?=\\s*(\"|[A-Za-z_]))",
           "name": "keyword.control.import.cleat"
         }
-      }
+      ]
     }
   }
 }

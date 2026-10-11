@@ -177,7 +177,7 @@ pub fn run(
             Item::Fn(f) => {
                 ev.fns.insert(f.name.clone(), f.clone());
             }
-            Item::Import { name, path, span } => ev.import(name, path, *span).map_err(|e| vec![e])?,
+            Item::Import { form, path, attrs, span } => ev.import_item(form, path, attrs, *span).map_err(|e| vec![e])?,
             Item::Export { name, after, value, .. } => {
                 let docs = match ev.eval(value).map_err(|e| vec![e])? {
                     Value::List(vs) => vs,
@@ -245,6 +245,8 @@ struct Evaluator {
     globals: Vec<(String, Value)>,
     locals: Vec<(String, Value)>,
     trace: Vec<(String, Span)>,
+    /// Functions brought in by `import { f }`: local name -> `hidden.f`.
+    fn_aliases: HashMap<String, String>,
     /// Imported `.cleat` modules, each with its own constants, functions and types.
     imports: HashMap<String, Rc<RefCell<Evaluator>>>,
     /// Directory imports resolve against.
@@ -260,7 +262,40 @@ impl Evaluator {
             locals: Vec::new(),
             trace: Vec::new(),
             imports: HashMap::new(),
+            fn_aliases: HashMap::new(),
             base: None,
+        }
+    }
+
+    fn import_item(&mut self, form: &ImportForm, path: &str, attrs: &[(String, String, Span)], span: Span) -> Result<(), EvalError> {
+        match form {
+            ImportForm::Namespace(ns) => self.import(ns, path, span),
+            ImportForm::Named(names) => {
+                let hidden = crate::modules::hidden_namespace(path, |n| self.imports.contains_key(n));
+                self.import(&hidden, path, span)?;
+                for (orig, local, _) in names {
+                    let q = format!("{hidden}.{orig}");
+                    if let Some(m) = self.imports.get(&hidden) {
+                        if m.borrow().fns.contains_key(orig) || m.borrow().fn_aliases.contains_key(orig) {
+                            self.fn_aliases.insert(local.clone(), q.clone());
+                        }
+                    }
+                    if let Some(v) = self.lookup_qualified(&q) {
+                        self.globals.push((local.clone(), v));
+                    }
+                }
+                Ok(())
+            }
+            ImportForm::Default(x) => {
+                let kind = attrs.iter().find(|(k, _, _)| k == "type").map_or("", |(_, v, _)| v.as_str());
+                let full = match &self.base {
+                    Some(b) => b.join(path),
+                    None => PathBuf::from(path),
+                };
+                let v = crate::modules::load_data(&full, kind).map_err(|m| self.error(span, m))?;
+                self.globals.push((x.clone(), v));
+                Ok(())
+            }
         }
     }
 
@@ -280,7 +315,7 @@ impl Evaluator {
         let in_module = |e: EvalError| EvalError { msg: format!("in module `{ns}` ({}): {}", path, e.msg), ..e };
         for item in &module.items {
             match item {
-                Item::Import { name, path, span } => sub.import(name, path, *span).map_err(in_module)?,
+                Item::Import { form, path, attrs, span } => sub.import_item(form, path, attrs, *span).map_err(in_module)?,
                 Item::Let { name, ty, value, span } => {
                     let v = sub.eval(value).map_err(in_module)?;
                     let v = match ty {
@@ -920,6 +955,9 @@ impl Evaluator {
     }
 
     fn call_values(&mut self, name: &str, vals: Vec<(Option<String>, Value, Span)>, span: Span) -> Result<Value, EvalError> {
+        if let Some(target) = self.fn_aliases.get(name).cloned() {
+            return self.call_values(&target, vals, span);
+        }
         if let Some(f) = self.fns.get(name).cloned() {
             return self.call_user(&f, vals, span);
         }

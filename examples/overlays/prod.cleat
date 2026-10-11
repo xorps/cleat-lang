@@ -2,7 +2,7 @@
 //
 //   cleat export examples/overlays/prod.cleat --set image=ghcr.io/acme/api:1.4.2
 
-import base from "./base.cleat"
+import * as base from "./base.cleat"
 
 input image: Str
 

@@ -270,13 +270,24 @@ impl Lexer {
     }
 
     fn string(&mut self, span: Span) -> Result<Tok, Diag> {
+        if self.peek(1) == Some('"') && self.peek(2) == Some('"') {
+            return self.text_block(span);
+        }
         self.bump(); // opening quote
+        self.string_body(span, true)
+    }
+
+    /// String contents up to the closing quote (`quoted`) or the end of input,
+    /// with escapes and `\(...)` interpolation.
+    fn string_body(&mut self, span: Span, quoted: bool) -> Result<Tok, Diag> {
         let mut parts = Vec::new();
         let mut cur = String::new();
         loop {
             match self.peek(0) {
-                None | Some('\n') => return Err(Diag::new(span, "unterminated string literal")),
-                Some('"') => {
+                None if !quoted => break,
+                None => return Err(Diag::new(span, "unterminated string literal")),
+                Some('\n') if quoted => return Err(Diag::new(span, "unterminated string literal (use `\"\"\"` for multi-line strings)")),
+                Some('"') if quoted => {
                     self.bump();
                     break;
                 }
@@ -309,6 +320,73 @@ impl Lexer {
             parts.push(StrPart::Lit(cur));
         }
         Ok(Tok::Str(parts))
+    }
+
+    /// `"""` multi-line strings. The text starts on the line after the opening
+    /// quotes; the indentation of the closing `"""` is removed from every line.
+    /// Escapes and `\(...)` work as in ordinary strings.
+    fn text_block(&mut self, span: Span) -> Result<Tok, Diag> {
+        for _ in 0..3 {
+            self.bump();
+        }
+        while self.peek(0).is_some_and(|c| c == ' ' || c == '\t') {
+            self.bump();
+        }
+        match self.peek(0) {
+            Some('\n') => {
+                self.bump();
+            }
+            Some('\r') if self.peek(1) == Some('\n') => {
+                self.bump();
+                self.bump();
+            }
+            _ => return Err(Diag::new(span, "a `\"\"\"` string starts on the line after the opening quotes")),
+        }
+        // Collect raw lines up to the closing quotes; `\"""` does not close.
+        let mut raw = String::new();
+        let closing_indent;
+        loop {
+            let Some(c) = self.peek(0) else { return Err(Diag::new(span, "unterminated `\"\"\"` string")) };
+            if c == '\\' {
+                raw.push(self.bump());
+                if let Some(next) = self.peek(0) {
+                    raw.push(next);
+                    self.bump();
+                }
+                continue;
+            }
+            if c == '"' && self.peek(1) == Some('"') && self.peek(2) == Some('"') {
+                let last_line = raw.rsplit('\n').next().unwrap_or("");
+                if !last_line.chars().all(|c| c == ' ' || c == '\t') {
+                    return Err(Diag::new(self.span(), "the closing `\"\"\"` must be on its own line"));
+                }
+                closing_indent = last_line.to_string();
+                raw.truncate(raw.len() - last_line.len());
+                for _ in 0..3 {
+                    self.bump();
+                }
+                break;
+            }
+            raw.push(self.bump());
+        }
+        // Remove the closing line's indentation; drop the newline before the closing quotes.
+        let body = raw.strip_suffix('\n').unwrap_or(&raw);
+        let mut text = String::new();
+        for (i, line) in body.split('\n').enumerate() {
+            if i > 0 {
+                text.push('\n');
+            }
+            match line.strip_prefix(closing_indent.as_str()) {
+                Some(rest) => text.push_str(rest),
+                None if line.trim().is_empty() => {}
+                None => {
+                    return Err(Diag::new(span, "a line in a `\"\"\"` string is indented less than the closing quotes"));
+                }
+            }
+        }
+        // Escapes and interpolation are processed on the dedented text.
+        let mut sub = Lexer { cs: text.chars().collect(), i: 0, line: span.line + 1, col: 1 };
+        sub.string_body(span, false)
     }
 
     fn punct(&mut self, span: Span) -> Result<Tok, Diag> {
