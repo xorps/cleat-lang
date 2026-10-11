@@ -117,6 +117,9 @@ pub struct Component {
     pub name: Option<String>,
     pub after: Vec<String>,
     pub docs: Vec<Value>,
+    /// Where each document comes from in the entry file: its element of an
+    /// exported list literal (`export [api, svc]`), else the `export` itself.
+    pub spans: Vec<Span>,
 }
 
 /// Evaluate a checked program and return its exports in source order.
@@ -222,16 +225,50 @@ pub fn run(
                 ev.fns.insert(f.name.clone(), f.clone());
             }
             Item::Import { .. } => {} // resolved above
-            Item::Export { name, after, value, .. } => {
+            Item::Export {
+                name,
+                after,
+                value,
+                span,
+            } => {
                 let docs = match ev.eval(value).map_err(|e| vec![e])? {
                     Value::List(vs) => vs,
                     v => vec![v],
                 };
                 let after = after.iter().map(|(a, _)| a.clone()).collect();
+                // An element that names a top-level `let` points at that definition.
+                let site = |e: &Expr| match &e.kind {
+                    ExprKind::Var(n) => items
+                        .iter()
+                        .find_map(|it| match it {
+                            Item::Let { name, span, .. } if name == n => Some(*span),
+                            _ => None,
+                        })
+                        .unwrap_or(e.span),
+                    _ => e.span,
+                };
+                let elems: Vec<Span> = match &value.kind {
+                    ExprKind::List(list_items) => list_items
+                        .iter()
+                        .map_while(|i| match i {
+                            ListItem::Elem(e) => Some(site(e)),
+                            _ => None,
+                        })
+                        .collect(),
+                    _ => Vec::new(),
+                };
+                let spans = if elems.len() == docs.len() {
+                    elems
+                } else if docs.len() == 1 {
+                    vec![site(value)]
+                } else {
+                    vec![*span; docs.len()]
+                };
                 comps.push(Component {
                     name: name.clone(),
                     after,
                     docs,
+                    spans,
                 });
             }
             Item::Type { .. } | Item::Refine { .. } => {}

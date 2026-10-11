@@ -1,8 +1,9 @@
 // cleat view: the exported resources as a cluster-style dashboard.
-// Three ways to get its data: served by `cleat view` (polls /api/state), a
-// snapshot (window.CLEAT_SNAPSHOT), or embedded with `?embed=1`, where the
-// page that opened or framed it posts the state (the playground does this).
-// No dependencies.
+// Four ways to get its data: served by `cleat view` (polls /api/state), a
+// snapshot (window.CLEAT_SNAPSHOT), embedded with `?embed=1`, where the page
+// that opened or framed it posts the state (the playground), or in a VS Code
+// webview, where the extension posts it and selecting a resource reveals its
+// source. No dependencies.
 (function () {
   "use strict";
 
@@ -54,7 +55,7 @@
       return {
         i, doc, kind, ns, name, yaml: r.yaml, component: r.component, wave: r.wave,
         key: `${kind}/${ns}/${name}`, out: [], in: [], notes: [], missing: [],
-        change: r.change, diff: r.diff,
+        change: r.change, diff: r.diff, line: r.line, col: r.col,
       };
     });
     // With --diff: resources the base revision has and the working tree doesn't.
@@ -483,6 +484,10 @@
     const kv = [["API version", esc(d.apiVersion || "—")]];
     if (r.ns) kv.push(["Namespace", esc(r.ns)]);
     kv.push(["Component", `${esc(r.component)} <span class="muted">· wave ${esc(r.wave)}</span>`]);
+    if (!r.removed && r.line > 0) {
+      const at = `${esc((data.file || "").split(/[\\/]/).pop())}:${r.line}`;
+      kv.push(["Defined at", vscodeApi ? `<a href="#" id="reveal-src">${at}</a>` : at]);
+    }
     const cols = COLUMNS[r.kind] || [];
     for (const [label, f] of cols) if (label !== "Images" && label !== "Ports") kv.push([label, f(r)]);
 
@@ -516,6 +521,12 @@
     }
     html += `<div class="yaml-head"><h2>YAML</h2><button type="button" id="copy-yaml">Copy</button></div><pre class="yaml">${yamlHtml(r.yaml || "")}</pre>`;
     el.innerHTML = html;
+    if ($("reveal-src")) {
+      $("reveal-src").onclick = (e) => {
+        e.preventDefault();
+        reveal(r);
+      };
+    }
     $("copy-yaml").onclick = async (e) => {
       try {
         await navigator.clipboard.writeText(r.yaml || "");
@@ -757,8 +768,17 @@
     if (route.sel) focus(route.sel);
   }
 
+  let lastSel = null;
+  function reveal(r) {
+    if (vscodeApi && r && !r.removed && r.line > 0) vscodeApi.postMessage({ type: "reveal", line: r.line, col: r.col });
+  }
+
   function render() {
     parseHash();
+    if (route.sel !== lastSel) {
+      lastSel = route.sel;
+      reveal(model.res.find((x) => x.key === route.sel));
+    }
     renderNamespaces();
     const rs = visible();
     renderNav(rs);
@@ -785,8 +805,29 @@
 
   let uiInputs = null; // null: use the command line's inputs
   const snapshot = window.CLEAT_SNAPSHOT;
-  const embedded = new URLSearchParams(location.search).has("embed");
+  const vscodeApi = typeof acquireVsCodeApi === "function" ? acquireVsCodeApi() : null;
+  const embedded = !!vscodeApi || new URLSearchParams(location.search).has("embed");
   if (embedded) document.body.classList.add("embed");
+  if (vscodeApi) followVsCodeTheme();
+
+  // VS Code marks its theme on <body> (vscode-light, vscode-dark, vscode-high-contrast),
+  // which can differ from the OS setting the stylesheet's media queries follow.
+  // Repeat the light and dark :root variables under those classes.
+  function followVsCodeTheme() {
+    const light = [];
+    const dark = [];
+    for (const sheet of document.styleSheets) {
+      for (const rule of sheet.cssRules) {
+        if (rule.selectorText === ":root") light.push(rule.style.cssText);
+        if (rule.media && /dark/.test(rule.media.mediaText)) {
+          for (const inner of rule.cssRules) if (inner.selectorText === ":root") dark.push(inner.style.cssText);
+        }
+      }
+    }
+    const style = document.createElement("style");
+    style.textContent = `body.vscode-light { ${light.join(" ")} }\nbody.vscode-dark, body.vscode-high-contrast { ${dark.join(" ")} }`;
+    document.head.append(style);
+  }
 
   function renderInputs(inputs) {
     const box = $("inputs");
@@ -893,7 +934,13 @@
   });
 
   if (snapshot) apply(snapshot);
-  else if (embedded) {
+  else if (vscodeApi) {
+    // Only the extension can post into its webview.
+    addEventListener("message", (e) => {
+      if (e.data && e.data.type === "cleat-state") apply(e.data.state);
+    });
+    vscodeApi.postMessage({ type: "cleat-view-ready" });
+  } else if (embedded) {
     // The embedding page posts `{ type: "cleat-state", state }` whenever its output changes.
     addEventListener("message", (e) => {
       if (e.origin !== location.origin || !e.data || e.data.type !== "cleat-state") return;

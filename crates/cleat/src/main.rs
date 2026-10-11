@@ -59,6 +59,8 @@ struct Opts {
     /// `view --diff` / `diff --base`: the git revision to compare with.
     base_rev: Option<String>,
     exit_code: bool,
+    /// `view --state`: print the page's data as JSON and exit.
+    state: bool,
 }
 
 fn main() -> ExitCode {
@@ -111,6 +113,11 @@ fn main() -> ExitCode {
             }
         };
     }
+    if cmd == "view" && args.get(1).map(String::as_str) == Some("--page") {
+        // For editor integrations: the page, which they send the state to.
+        print!("{}", cleat::view::page());
+        return ExitCode::SUCCESS;
+    }
     if cmd == "lsp" {
         return match cleat::lsp::run() {
             Ok(()) => ExitCode::SUCCESS,
@@ -143,7 +150,7 @@ fn main() -> ExitCode {
     match cmd.as_str() {
         "check" => check(&opts, &src),
         "export" => export(opts, &src),
-        "view" => view(opts),
+        "view" => view(opts, src),
         "diff" => diff(opts),
         _ => {
             eprintln!("{USAGE}");
@@ -173,6 +180,7 @@ fn parse_opts(args: &[String]) -> Result<Opts, String> {
         open: true,
         base_rev: None,
         exit_code: false,
+        state: false,
     };
     let mut it = args.iter();
     while let Some(a) = it.next() {
@@ -204,6 +212,7 @@ fn parse_opts(args: &[String]) -> Result<Opts, String> {
             "--no-open" => o.open = false,
             "--diff" | "--base" => o.base_rev = Some(val()?),
             "--exit-code" => o.exit_code = true,
+            "--state" => o.state = true,
             s if s.starts_with("--") => return Err(format!("unknown option {s}")),
             s if o.file.is_empty() => o.file = s.to_string(),
             s => return Err(format!("unexpected argument {s}")),
@@ -351,7 +360,7 @@ fn export(opts: Opts, src: &str) -> ExitCode {
     ExitCode::SUCCESS
 }
 
-fn view(opts: Opts) -> ExitCode {
+fn view(opts: Opts, src: String) -> ExitCode {
     if !matches!(opts.target.as_str(), "plain" | "argocd") {
         eprintln!("error: cleat view supports --target plain or argocd");
         return ExitCode::from(2);
@@ -373,7 +382,13 @@ fn view(opts: Opts) -> ExitCode {
         inputs: opts.inputs,
         target: opts.target,
         diff,
+        source: opts.stdin.then_some(src),
     };
+    if opts.state {
+        // For editor integrations: the page's data once, as JSON.
+        println!("{}", json_out(&cleat::view::state(&cfg, None)));
+        return ExitCode::SUCCESS;
+    }
     if let Some(out) = &opts.out {
         return match std::fs::write(out, cleat::view::snapshot(&cfg)) {
             Ok(()) => {
@@ -547,6 +562,10 @@ fn diff(opts: Opts) -> ExitCode {
     }
 }
 
+fn json_out(v: &Value) -> String {
+    emit::to_json(v, false)
+}
+
 /// Best effort: the URL is printed either way.
 fn open_browser(url: &str) {
     let cmd = if cfg!(target_os = "macos") {
@@ -619,6 +638,7 @@ fn argocd(sub: Option<&str>) -> ExitCode {
                 open: false,
                 base_rev: None,
                 exit_code: false,
+                state: false,
             };
             export(opts, &src)
         }

@@ -17,6 +17,7 @@ fn app(name: &str, src: &str) -> ViewConfig {
         inputs: vec![("env".into(), InputValue::Raw("prod".into()))],
         target: "argocd".into(),
         diff: None,
+        source: None,
     }
 }
 
@@ -121,4 +122,25 @@ fn the_server_answers_only_for_its_own_host() {
     let data = json::parse(resp.split_once("\r\n\r\n").unwrap().1).unwrap();
     assert!(strs(&data, &["resources", "yaml"])[0].contains("ENV: dev"));
     assert!(request(&addr, "GET /../../etc/passwd HTTP/1.1\r\nHost: {host}\r\n\r\n").starts_with("HTTP/1.1 404"));
+}
+
+#[test]
+fn resources_point_at_where_they_are_defined() {
+    // A `let` named in an exported list points at the `let`; anything else at itself.
+    let src = "let cm = { kind: \"ConfigMap\", metadata.name: \"a\" }\nexport [\n  cm,\n  { kind: \"Secret\", metadata.name: \"b\" },\n]\nexport { kind: \"Service\", metadata.name: \"c\" }\n";
+    let mut cfg = app("spans", src);
+    cfg.inputs.clear();
+    let s = state(&cfg, None);
+    let at: Vec<(String, String)> = strs(&s, &["resources", "line"])
+        .into_iter()
+        .zip(strs(&s, &["resources", "col"]))
+        .collect();
+    let pair = |l: &str, c: &str| (l.to_string(), c.to_string());
+    assert_eq!(at, [pair("1", "1"), pair("4", "3"), pair("6", "8")]);
+    // The editor's unsaved text is used instead of the file.
+    cfg.source = Some("export { kind: \"ConfigMap\", metadata.name: \"unsaved\" }".into());
+    assert_eq!(
+        strs(&state(&cfg, None), &["resources", "doc", "metadata", "name"]),
+        ["unsaved"]
+    );
 }
