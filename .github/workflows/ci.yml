@@ -30,6 +30,7 @@ jobs:
       - run: cargo test --locked
       - name: Check examples
         run: |
+          cargo run -q -- check examples/quickstart.cleat
           cargo run -q -- check examples/webapp.cleat
           cargo run -q -- check examples/overlays/prod.cleat
           cargo run -q -- export examples/overlays/prod.cleat --set image=ghcr.io/acme/api:1 --target argocd > /dev/null
