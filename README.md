@@ -202,6 +202,19 @@ let conf = """
     """
 ```
 
+### See what you're deploying
+
+```console
+$ cleat view examples/webapp.cleat --input examples/webapp.inputs.json
+Viewing examples/webapp.cleat at http://127.0.0.1:52418/ (Ctrl-C to stop)
+```
+
+opens the exported resources in your browser as a cluster-style dashboard:
+grouped by kind, with replicas, images, ports, routes, relations between
+resources and the YAML, updating as you edit. It also flags what the type
+checker can't see, such as a Service that selects no workload or an Ingress
+pointing at a missing Service. `--out view.html` writes a static snapshot.
+
 ### Argo CD
 
 Cleat runs as an Argo CD

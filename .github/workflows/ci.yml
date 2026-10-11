@@ -34,8 +34,10 @@ jobs:
         run: |
           rustup target add wasm32-unknown-unknown
           cargo clippy -p cleat-wasm --locked --target wasm32-unknown-unknown -- -D warnings
-      - name: Check the playground script
-        run: node --check site/playground/playground.js
+      - name: Check the page scripts (playground, cleat view)
+        run: |
+          node --check site/playground/playground.js
+          node --check crates/cleat/src/view/view.js
       - name: Check examples
         run: |
           cargo run -q -- check examples/quickstart.cleat

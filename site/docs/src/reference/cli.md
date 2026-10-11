@@ -4,6 +4,7 @@
 usage:
   cleat check  <file.cleat> [--vcs]
   cleat export <file.cleat> [options]
+  cleat view   <file.cleat>  the exported resources in a browser, live
   cleat gen <schema>         print Cleat types for an OpenAPI document or CRD file
   cleat lsp                  language server on stdio (used by editors)
   cleat argocd generate      Argo CD plugin: export $ARGOCD_ENV_CLEAT_FILE (default main.cleat)
@@ -25,6 +26,11 @@ export options:
   --flux-path <path>       repository path of --out (flux; default: .)
   --flux-namespace <ns>    namespace for Kustomizations (flux; default: flux-system)
   --flux-prefix <prefix>   prefix for Kustomization names (flux)
+
+view options (also: --input, --set, --target plain|argocd):
+  --port <n>               port on 127.0.0.1 (default: any free port)
+  --no-open                don't open a browser
+  --out <file.html>        write a self-contained snapshot instead of serving
 ```
 
 ## `cleat check`
@@ -45,6 +51,27 @@ Inputs come from `--input <file>` (a JSON or YAML object), `--set name=value`
 accepts one, otherwise JSON), or Argo CD's `ARGOCD_APP_PARAMETERS`
 (`--argocd-params`). When an input is given more than once, the last one on
 the command line wins.
+
+## `cleat view`
+
+Shows the exported resources in your browser, laid out like a cluster
+dashboard: resources grouped by kind (Workloads, Network, Config, ...), with
+kind-specific columns (replicas and images, Service ports and what they route
+to, Ingress routes, ConfigMap keys), a namespace filter and search, and the
+sync order of components. Selecting a resource shows its containers, labels,
+relations to other resources and its YAML.
+
+It also checks the resources against each other, which the type checker
+can't: a Service that selects no workload, a named `targetPort` no selected
+container has, an Ingress or HorizontalPodAutoscaler pointing at something
+that isn't there, and ConfigMaps, Secrets and volume claims that are
+referenced but not in the output (which may be fine, if they already exist
+in the cluster).
+
+The page updates within a second when the file, or anything it imports,
+changes. Inputs start from `--set` and `--input` and can be edited on the
+page. The server listens on 127.0.0.1 only. With `--out view.html` it writes
+a self-contained snapshot instead, to attach to a pull request or a ticket.
 
 ## `cleat gen`
 
