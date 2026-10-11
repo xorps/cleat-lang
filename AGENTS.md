@@ -40,6 +40,11 @@ deploy/argocd/e2e/run.sh                      # real Argo CD on a throwaway kind
 deploy/argocd/e2e/run.sh cleanup              # delete that cluster
 ```
 
+In CI the Argo CD end-to-end test (`.github/workflows/argocd-e2e.yml`) is slow,
+so it runs weekly, on demand, and on pull requests labeled `e2e` (and on each
+push to them while the label is on). Add the label to changes that touch the
+plugin, the sidecar image, inputs or output targets.
+
 Before finishing a change, run `cargo fmt`, `cargo clippy --all-targets -- -D warnings`,
 `cargo test`, the no-std build of the core above, and check the examples (`examples/*.cleat`, `examples/overlays/prod.cleat`).
 

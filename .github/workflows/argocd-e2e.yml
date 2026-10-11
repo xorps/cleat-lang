@@ -1,0 +1,33 @@
+name: Argo CD e2e
+
+# The end-to-end test against a real Argo CD in a throwaway kind cluster
+# (deploy/argocd/e2e/run.sh). It's slow, so it runs weekly, on demand, and on
+# pull requests labeled `e2e`, including later pushes while the label is on.
+
+on:
+  schedule:
+    - cron: "0 5 * * 1"
+  workflow_dispatch:
+  pull_request:
+    types: [opened, reopened, synchronize, labeled]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: argocd-e2e-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  argocd-e2e:
+    # On pull requests: only with the `e2e` label, and on `labeled` events only
+    # when that label is the one being added (not for every other label).
+    if: >-
+      github.event_name != 'pull_request' ||
+      (contains(github.event.pull_request.labels.*.name, 'e2e') &&
+       (github.event.action != 'labeled' || github.event.label.name == 'e2e'))
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - run: deploy/argocd/e2e/run.sh
