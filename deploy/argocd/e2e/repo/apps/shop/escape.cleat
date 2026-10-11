@@ -1,0 +1,3 @@
+// Must be rejected: reads outside the repository checkout.
+import secret from "../../../../../../../../../../etc/passwd" with { type: "text" }
+export { secret }

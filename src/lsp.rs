@@ -8,7 +8,7 @@ use std::panic::{AssertUnwindSafe, catch_unwind};
 use crate::check::{Hover, Outcome};
 use crate::diag::Span;
 use crate::eval::Value;
-use crate::{check_source_at, emit, json};
+use crate::{check_source_in, emit, json};
 use std::path::{Path, PathBuf};
 
 struct Doc {
@@ -79,8 +79,10 @@ pub fn run() -> io::Result<()> {
 }
 
 fn update(out: &mut impl Write, docs: &mut HashMap<String, Doc>, uri: String, text: String) -> io::Result<()> {
-    let base = uri_to_path(&uri).and_then(|p| p.parent().map(Path::to_path_buf));
-    let result = catch_unwind(AssertUnwindSafe(|| check_source_at(&text, base.as_deref())));
+    let path = uri_to_path(&uri);
+    let base = path.as_ref().and_then(|p| p.parent().map(Path::to_path_buf));
+    let root = path.as_deref().and_then(crate::modules::find_root);
+    let result = catch_unwind(AssertUnwindSafe(|| check_source_in(&text, base.as_deref(), root.as_deref())));
     let (diags, hovers) = match result {
         Ok(outcome) => (diagnostics(&text, &outcome), outcome.hovers),
         Err(_) => {

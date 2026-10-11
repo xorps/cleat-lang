@@ -47,7 +47,8 @@ pub struct CheckedModule {
     pub outcome: Outcome,
 }
 
-type CheckedCache = std::sync::Mutex<HashMap<PathBuf, (std::time::SystemTime, std::sync::Arc<CheckedModule>)>>;
+type CheckedCache =
+    std::sync::Mutex<HashMap<(PathBuf, Option<PathBuf>), (std::time::SystemTime, std::sync::Arc<CheckedModule>)>>;
 
 thread_local! {
     /// Modules being checked, innermost last (for import cycle detection).
@@ -55,12 +56,13 @@ thread_local! {
 }
 
 /// Check a `.cleat` module on its own (its imports resolve relative to its directory).
-pub fn checked_module(path: &Path) -> Result<std::sync::Arc<CheckedModule>, String> {
+pub fn checked_module(path: &Path, root: Option<&Path>) -> Result<std::sync::Arc<CheckedModule>, String> {
     static CACHE: std::sync::OnceLock<CheckedCache> = std::sync::OnceLock::new();
     let cache = CACHE.get_or_init(Default::default);
     let canon = path.canonicalize().map_err(|e| format!("cannot read `{}`: {e}", path.display()))?;
     let mtime = std::fs::metadata(&canon).and_then(|m| m.modified()).unwrap_or(std::time::SystemTime::UNIX_EPOCH);
-    if let Some((t, c)) = cache.lock().unwrap().get(&canon) {
+    let key = (canon.clone(), root.map(Path::to_path_buf));
+    if let Some((t, c)) = cache.lock().unwrap().get(&key) {
         if *t == mtime {
             return Ok(c.clone());
         }
@@ -78,10 +80,10 @@ pub fn checked_module(path: &Path) -> Result<std::sync::Arc<CheckedModule>, Stri
     }
     let module = crate::modules::load(&canon)?;
     CHECKING.with(|s| s.borrow_mut().push(canon.clone()));
-    let outcome = check_program(&module.items, canon.parent());
+    let outcome = check_program_in(&module.items, canon.parent(), root);
     CHECKING.with(|s| s.borrow_mut().pop());
     let checked = std::sync::Arc::new(CheckedModule { outcome });
-    cache.lock().unwrap().insert(canon, (mtime, checked.clone()));
+    cache.lock().unwrap().insert(key, (mtime, checked.clone()));
     Ok(checked)
 }
 
@@ -104,8 +106,14 @@ enum RPat {
 
 /// Check a program; imports are resolved relative to `base` (the file's directory).
 pub fn check_program(items: &[Item], base: Option<&Path>) -> Outcome {
+    check_program_in(items, base, None)
+}
+
+/// Like `check_program`, with every import required to stay inside `root`.
+pub fn check_program_in(items: &[Item], base: Option<&Path>, root: Option<&Path>) -> Outcome {
     let mut c = Checker {
         base: base.map(Path::to_path_buf),
+        root: root.map(Path::to_path_buf),
         ctx: TypeCtx::default(),
         fns: HashMap::new(),
         scope: Vec::new(),
@@ -114,6 +122,7 @@ pub fn check_program(items: &[Item], base: Option<&Path>) -> Outcome {
         cur_index: None,
         labels: Vec::new(),
         namespaces: HashSet::new(),
+        hidden_labels: HashMap::new(),
         global_names: Vec::new(),
         patch_path: String::new(),
         out: Outcome::default(),
@@ -170,6 +179,8 @@ struct Checker {
     /// Names for anonymous nested types in messages (`Svc.spec.ports[]`), keyed by
     /// the span of the literal they describe.
     labels: Vec<(Span, String)>,
+    /// Messages for namespaces created by named imports (`import { A } from "f"`).
+    hidden_labels: HashMap<String, String>,
     /// Imported namespaces (`import * as ns from ...`).
     namespaces: HashSet<String>,
     /// Top-level `let`s and `input`s, offered to importers.
@@ -177,6 +188,8 @@ struct Checker {
     /// The `with` path being checked, for messages.
     patch_path: String,
     base: Option<PathBuf>,
+    /// Imports must resolve inside this directory.
+    root: Option<PathBuf>,
     out: Outcome,
 }
 
@@ -278,6 +291,10 @@ impl Checker {
         self.ctx.alias_src.insert(name.to_string(), te);
     }
 
+    fn import_label(&self, ns: &str) -> String {
+        self.hidden_labels.get(ns).cloned().unwrap_or_else(|| format!("import `{ns}`"))
+    }
+
     /// The three ES import forms (SPEC §4.1).
     fn import_item(&mut self, form: &ImportForm, path: &str, attrs: &[(String, String, Span)], span: Span) {
         for (k, _, sp) in attrs {
@@ -296,6 +313,7 @@ impl Checker {
             (ImportForm::Namespace(ns), None) => self.import(ns, path, span),
             (ImportForm::Named(names), None) => {
                 let hidden = crate::modules::hidden_namespace(path, |n| self.namespaces.contains(n));
+                self.hidden_labels.insert(hidden.clone(), format!("import from `{path}`"));
                 self.import(&hidden, path, span);
                 for (orig, local, sp) in names {
                     self.bind_named(&hidden, path, orig, local, *sp);
@@ -309,9 +327,12 @@ impl Checker {
                 ),
             ),
             (ImportForm::Default(x), Some((_, kind, sp))) => {
-                let full = match &self.base {
-                    Some(b) => b.join(path),
-                    None => PathBuf::from(path),
+                let full = match crate::modules::resolve_import(self.base.as_deref(), self.root.as_deref(), path) {
+                    Ok(f) => f,
+                    Err(e) => {
+                        self.error(span, format!("import `{x}`: {e}"));
+                        return self.bind(x, Ty::Error, span);
+                    }
                 };
                 if !["json", "yaml", "text"].contains(&kind.as_str()) {
                     return self.error(*sp, format!("unsupported import type `{kind}` (expected \"json\", \"yaml\" or \"text\")"));
@@ -322,7 +343,10 @@ impl Checker {
                         self.bind_var(x, t, span);
                         self.global_names.push(x.clone());
                     }
-                    Err(e) => self.error(span, format!("import `{x}`: {e}")),
+                    Err(e) => {
+                        self.error(span, format!("import `{x}`: {e}"));
+                        self.bind(x, Ty::Error, span);
+                    }
                 }
             }
         }
@@ -331,6 +355,12 @@ impl Checker {
     /// `import { orig as local }`: bind a type, function and/or constant from `hidden.orig`.
     fn bind_named(&mut self, hidden: &str, path: &str, orig: &str, local: &str, sp: Span) {
         let q = format!("{hidden}.{orig}");
+        if self.ctx.failed_namespaces.contains(hidden) {
+            // Already reported at the import; make the name usable without further errors.
+            self.ctx.alias_src.insert(local.to_string(), TypeExpr { kind: TypeKind::Named("Json".into()), span: sp });
+            self.scope.push((local.to_string(), Ty::Error));
+            return;
+        }
         let mut found = false;
         if self.ctx.alias_src.contains_key(&q) {
             if BUILTIN_TYPES.contains(&local) || self.ctx.alias_src.contains_key(local) {
@@ -382,16 +412,17 @@ impl Checker {
 
     /// Register an imported module's types as `ns.T`.
     fn import(&mut self, ns: &str, path: &str, span: Span) {
-        let full = match &self.base {
-            Some(b) => b.join(path),
-            None => PathBuf::from(path),
-        };
         if !self.namespaces.insert(ns.to_string()) {
             return self.error(span, format!("`{ns}` is already imported"));
         }
-        let module = match crate::modules::load(&full) {
-            Ok(m) => m,
-            Err(e) => return self.error(span, format!("import `{ns}`: {e}")),
+        let loaded = crate::modules::resolve_import(self.base.as_deref(), self.root.as_deref(), path)
+            .and_then(|full| crate::modules::load(&full).map(|m| (full, m)));
+        let (full, module) = match loaded {
+            Ok(x) => x,
+            Err(e) => {
+                self.ctx.failed_namespaces.insert(ns.to_string());
+                return self.error(span, format!("{}: {e}", self.import_label(ns)));
+            }
         };
         if module.is_source {
             return self.import_source(ns, &full, span);
@@ -414,13 +445,17 @@ impl Checker {
 
     /// Import a `.cleat` module: its types, functions and constants become `ns.x`.
     fn import_source(&mut self, ns: &str, full: &Path, span: Span) {
-        let checked = match checked_module(full) {
+        let checked = match checked_module(full, self.root.as_deref()) {
             Ok(c) => c,
-            Err(e) => return self.error(span, format!("import `{ns}`: {e}")),
+            Err(e) => {
+                self.ctx.failed_namespaces.insert(ns.to_string());
+                return self.error(span, format!("{}: {e}", self.import_label(ns)));
+            }
         };
         let out = &checked.outcome;
         for e in out.errors.iter().take(5) {
-            self.error(span, format!("import `{ns}`: {}:{}: {}", full.display(), e.span, e.msg));
+            let label = self.import_label(ns);
+            self.error(span, format!("{label}: {}:{}: {}", full.display(), e.span, e.msg));
         }
         let prefix = format!("{ns}.");
         let keys: HashSet<&str> = out.ctx.alias_src.keys().map(String::as_str).collect();
@@ -1325,6 +1360,9 @@ impl Checker {
                 // `ns.x`: a constant from an imported module.
                 if let Some(q) = qualified_name(e) {
                     let root = q.split('.').next().unwrap_or("");
+                    if self.lookup(root).is_none() && self.ctx.failed_namespaces.contains(root) {
+                        return Ty::Error;
+                    }
                     if self.lookup(root).is_none() && self.namespaces.contains(root) {
                         if let Some(t) = self.lookup(&q).cloned() {
                             let label_s = label.to_string();
@@ -1356,8 +1394,10 @@ impl Checker {
             ExprKind::Call(name, args) => self.synth_call(name, args, e.span),
             ExprKind::Typed(tname, obj) => {
                 if !self.ctx.alias_src.contains_key(tname) {
-                    let msg = self.ctx.unknown_type_message(tname);
-                    self.error(e.span, msg);
+                    if !self.ctx.in_failed_namespace(tname) {
+                        let msg = self.ctx.unknown_type_message(tname);
+                        self.error(e.span, msg);
+                    }
                     self.synth(obj);
                     return Ty::Error;
                 }
@@ -2097,6 +2137,8 @@ impl Checker {
         }
         if self.lookup(name).is_some() {
             self.error(span, format!("`{name}` is a variable, not a function"));
+        } else if self.ctx.in_failed_namespace(name) {
+            // The failed import was already reported.
         } else {
             let hint = did_you_mean(name, self.fns.keys().map(String::as_str).chain(BUILTINS));
             self.error(span, format!("unknown function `{name}`{hint} (functions must be declared before use)"));

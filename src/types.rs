@@ -249,6 +249,8 @@ pub struct TypeCtx {
     pub alias_src: HashMap<String, TypeExpr>,
     pub aliases: HashMap<String, Ty>,
     resolving: Vec<String>,
+    /// Namespaces whose import failed: references into them are already explained.
+    pub failed_namespaces: std::collections::HashSet<String>,
     /// Documentation for imported types and fields, keyed `ns.Type` / `ns.Type.field`.
     pub docs: HashMap<String, String>,
     /// Diagnostics from resolution; the checker drains these.
@@ -279,8 +281,10 @@ impl TypeCtx {
                     Ty::Alias(n.clone())
                 }
                 _ => {
-                    let msg = self.unknown_type_message(n);
-                    self.diags.push(Diag::new(te.span, msg));
+                    if !self.in_failed_namespace(n) {
+                        let msg = self.unknown_type_message(n);
+                        self.diags.push(Diag::new(te.span, msg));
+                    }
                     Ty::Error
                 }
             },
@@ -337,6 +341,10 @@ impl TypeCtx {
     }
 
     /// For `k8s.Event`, list the qualified names that end in `Event`; otherwise suggest a near miss.
+    pub fn in_failed_namespace(&self, name: &str) -> bool {
+        name.split_once('.').is_some_and(|(ns, _)| self.failed_namespaces.contains(ns))
+    }
+
     pub fn unknown_type_message(&self, n: &str) -> String {
         if let Some((ns, short)) = n.split_once('.') {
             let mut cands: Vec<&String> = self

@@ -13,6 +13,10 @@ usage:
   cleat argocd generate      Argo CD plugin: export $ARGOCD_ENV_CLEAT_FILE (default main.cleat)
   cleat argocd params        Argo CD plugin: announce the file's inputs as parameters
 
+options:
+  --root <dir>             imports must stay inside this directory
+                           (default: nearest directory with .git, else the file's directory)
+
 export options:
   --input <file>           input values: a JSON or YAML object
   --set <name>=<value>     one input (decoded by its declared type); repeatable
@@ -27,6 +31,8 @@ export options:
 
 struct Opts {
     file: String,
+    /// Imports must stay inside this directory (default: see `project_root`).
+    root: Option<String>,
     vcs: bool,
     inputs: Vec<(String, InputValue)>,
     target: String,
@@ -96,6 +102,7 @@ fn main() -> ExitCode {
 fn parse_opts(args: &[String]) -> Result<Opts, String> {
     let mut o = Opts {
         file: String::new(),
+        root: None,
         vcs: false,
         inputs: Vec::new(),
         target: "plain".into(),
@@ -138,6 +145,7 @@ fn parse_opts(args: &[String]) -> Result<Opts, String> {
                 o.inputs.push((k.to_string(), InputValue::Raw(v.to_string())));
             }
             "--target" => o.target = val()?,
+            "--root" => o.root = Some(val()?),
             "--out" => o.out = Some(val()?),
             "--flux-source" => o.flux.source = val()?,
             "--flux-path" => o.flux.path = val()?,
@@ -191,7 +199,8 @@ fn print_diags(file: &str, out: &Outcome) {
 }
 
 fn check(opts: &Opts, src: &str) -> ExitCode {
-    let out = cleat::check_source_at(src, base_dir(&opts.file).as_deref());
+    let root = project_root(opts);
+    let out = cleat::check_source_in(src, base_dir(&opts.file).as_deref(), root.as_deref());
     print_diags(&opts.file, &out);
     if opts.vcs {
         for vc in &out.vcs {
@@ -212,7 +221,8 @@ fn check(opts: &Opts, src: &str) -> ExitCode {
 fn export(opts: Opts, src: &str) -> ExitCode {
     let file = &opts.file;
     let base = base_dir(file);
-    let (outcome, comps) = match cleat::export_at(src, base.as_deref(), opts.inputs) {
+    let root = project_root(&opts);
+    let (outcome, comps) = match cleat::export_in(src, base.as_deref(), root.as_deref(), opts.inputs) {
         Ok(r) => r,
         Err(ExportError::Check(out)) => {
             print_diags(file, &out);
@@ -307,6 +317,7 @@ fn argocd(sub: Option<&str>) -> ExitCode {
             };
             let target = std::env::var("ARGOCD_ENV_CLEAT_TARGET").unwrap_or_else(|_| "argocd".into());
             let opts = Opts {
+                root: argocd_root().map(|p| p.display().to_string()),
                 file,
                 vcs: false,
                 inputs,
@@ -324,7 +335,7 @@ fn argocd(sub: Option<&str>) -> ExitCode {
             export(opts, &src)
         }
         Some("params") => {
-            let infos = match cleat::inputs(&src, base_dir(&file).as_deref()) {
+            let infos = match cleat::inputs(&src, base_dir(&file).as_deref(), argocd_root().as_deref()) {
                 Ok(i) => i,
                 Err(out) => {
                     print_diags(&file, &out);
@@ -372,4 +383,21 @@ fn argocd(sub: Option<&str>) -> ExitCode {
             ExitCode::from(2)
         }
     }
+}
+
+fn project_root(opts: &Opts) -> Option<std::path::PathBuf> {
+    match &opts.root {
+        Some(r) => Some(r.into()),
+        None => cleat::modules::find_root(std::path::Path::new(&opts.file)),
+    }
+}
+
+/// In Argo CD the working directory is the app's path inside the repository
+/// checkout; the checkout is the root (so `apps/shop` may import `../../schemas`).
+fn argocd_root() -> Option<std::path::PathBuf> {
+    let cwd = std::env::current_dir().ok()?;
+    let depth = std::env::var("ARGOCD_APP_SOURCE_PATH")
+        .map(|p| std::path::Path::new(&p).components().filter(|c| matches!(c, std::path::Component::Normal(_))).count())
+        .unwrap_or(0);
+    cwd.ancestors().nth(depth).map(std::path::Path::to_path_buf)
 }
