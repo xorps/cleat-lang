@@ -62,9 +62,8 @@ pub fn argocd(comps: &[Component]) -> Result<Vec<Value>, String> {
     for (w, c) in ordered(comps) {
         for (i, doc) in c.docs.iter().enumerate() {
             let mut doc = doc.clone();
-            set_annotation(&mut doc, SYNC_WAVE, &w.to_string()).map_err(|m| {
-                format!("component `{}`, document {i}: {m}", comp_name(c))
-            })?;
+            set_annotation(&mut doc, SYNC_WAVE, &w.to_string())
+                .map_err(|m| format!("component `{}`, document {i}: {m}", comp_name(c)))?;
             out.push(doc);
         }
     }
@@ -73,7 +72,9 @@ pub fn argocd(comps: &[Component]) -> Result<Vec<Value>, String> {
 
 /// Set `metadata.annotations[key]` unless the document already sets it.
 fn set_annotation(doc: &mut Value, key: &str, val: &str) -> Result<(), String> {
-    let Value::Obj(es) = doc else { return Err("not a Kubernetes object".into()) };
+    let Value::Obj(es) = doc else {
+        return Err("not a Kubernetes object".into());
+    };
     let Some((_, Value::Obj(meta))) = es.iter_mut().find(|(k, _)| k == "metadata") else {
         return Err("not a Kubernetes object (no `metadata`)".into());
     };
@@ -98,7 +99,11 @@ pub fn flux(comps: &[Component], o: &FluxOptions) -> Vec<(String, String)> {
     for (_, c) in ordered(comps) {
         let name = comp_name(c);
         files.push((format!("{name}/resources.yaml"), emit::to_yaml_stream(&c.docs)));
-        let path = if base.is_empty() || base == "." { format!("./{name}") } else { format!("./{base}/{name}") };
+        let path = if base.is_empty() || base == "." {
+            format!("./{name}")
+        } else {
+            format!("./{base}/{name}")
+        };
         let mut spec = vec![
             ("interval".to_string(), s(&o.interval)),
             ("path".to_string(), s(&path)),
@@ -111,7 +116,10 @@ pub fn flux(comps: &[Component], o: &FluxOptions) -> Vec<(String, String)> {
             ),
         ];
         if !c.after.is_empty() {
-            let deps = c.after.iter().map(|d| Value::Obj(vec![("name".into(), s(&format!("{}{d}", o.prefix)))]));
+            let deps = c
+                .after
+                .iter()
+                .map(|d| Value::Obj(vec![("name".into(), s(&format!("{}{d}", o.prefix)))]));
             spec.push(("dependsOn".to_string(), Value::List(deps.collect())));
         }
         kustomizations.push(Value::Obj(vec![
@@ -127,6 +135,9 @@ pub fn flux(comps: &[Component], o: &FluxOptions) -> Vec<(String, String)> {
             ("spec".into(), Value::Obj(spec)),
         ]));
     }
-    files.push(("flux-kustomizations.yaml".to_string(), emit::to_yaml_stream(&kustomizations)));
+    files.push((
+        "flux-kustomizations.yaml".to_string(),
+        emit::to_yaml_stream(&kustomizations),
+    ));
     files
 }

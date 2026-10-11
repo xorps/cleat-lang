@@ -58,7 +58,13 @@ fn main() -> ExitCode {
         };
         let src = std::fs::read_to_string(file).unwrap_or_default();
         let root = cleat::modules::find_root(std::path::Path::new(file));
-        let c = cleat::complete::complete(&src, line.parse().unwrap_or(0), col.parse().unwrap_or(0), base_dir(file).as_deref(), root.as_deref());
+        let c = cleat::complete::complete(
+            &src,
+            line.parse().unwrap_or(0),
+            col.parse().unwrap_or(0),
+            base_dir(file).as_deref(),
+            root.as_deref(),
+        );
         match c {
             Some(c) => {
                 for i in c.items {
@@ -159,7 +165,9 @@ fn parse_opts(args: &[String]) -> Result<Opts, String> {
             "--stdin" => o.stdin = true,
             "--set" => {
                 let kv = val()?;
-                let (k, v) = kv.split_once('=').ok_or(format!("--set expects name=value, got `{kv}`"))?;
+                let (k, v) = kv
+                    .split_once('=')
+                    .ok_or(format!("--set expects name=value, got `{kv}`"))?;
                 o.inputs.push((k.to_string(), InputValue::Raw(v.to_string())));
             }
             "--target" => o.target = val()?,
@@ -182,13 +190,17 @@ fn parse_opts(args: &[String]) -> Result<Opts, String> {
 
 /// Argo CD passes plugin parameters as `[{"name": .., "string" | "array" | "map": ..}]`.
 fn argocd_params() -> Result<Vec<(String, InputValue)>, String> {
-    let Ok(raw) = std::env::var("ARGOCD_APP_PARAMETERS") else { return Ok(Vec::new()) };
+    let Ok(raw) = std::env::var("ARGOCD_APP_PARAMETERS") else {
+        return Ok(Vec::new());
+    };
     let Value::List(params) = json::parse(&raw).map_err(|e| format!("ARGOCD_APP_PARAMETERS: {e}"))? else {
         return Err("ARGOCD_APP_PARAMETERS must be a JSON array".into());
     };
     let mut out = Vec::new();
     for p in params {
-        let Some(Value::Str(name)) = p.get("name") else { continue };
+        let Some(Value::Str(name)) = p.get("name") else {
+            continue;
+        };
         let strs = |v: &Value| match v {
             Value::Str(s) => s.clone(),
             other => other.to_string(),
@@ -233,7 +245,11 @@ fn check(opts: &Opts, src: &str) -> ExitCode {
         count(VcStatus::Proved),
         count(VcStatus::Runtime),
     );
-    if out.errors.is_empty() { ExitCode::SUCCESS } else { ExitCode::FAILURE }
+    if out.errors.is_empty() {
+        ExitCode::SUCCESS
+    } else {
+        ExitCode::FAILURE
+    }
 }
 
 fn export(opts: Opts, src: &str) -> ExitCode {
@@ -296,7 +312,11 @@ fn export(opts: Opts, src: &str) -> ExitCode {
         }
     };
     if opts.json {
-        let v = if docs.len() == 1 { docs[0].clone() } else { Value::List(docs) };
+        let v = if docs.len() == 1 {
+            docs[0].clone()
+        } else {
+            Value::List(docs)
+        };
         println!("{}", emit::to_json(&v, true));
     } else {
         print!("{}", emit::to_yaml_stream(&docs));
@@ -305,7 +325,13 @@ fn export(opts: Opts, src: &str) -> ExitCode {
 }
 
 fn base_dir(file: &str) -> Option<std::path::PathBuf> {
-    std::path::Path::new(file).parent().map(|p| if p.as_os_str().is_empty() { ".".into() } else { p.to_path_buf() })
+    std::path::Path::new(file).parent().map(|p| {
+        if p.as_os_str().is_empty() {
+            ".".into()
+        } else {
+            p.to_path_buf()
+        }
+    })
 }
 
 // ---------- Argo CD config management plugin ----------
@@ -386,7 +412,10 @@ fn argocd(sub: Option<&str>) -> ExitCode {
                             p.push(("array".into(), Value::List(xs.iter().map(|x| s(&as_str(x))).collect())));
                         }
                         (Some(Value::Obj(es)), "map") => {
-                            p.push(("map".into(), Value::Obj(es.iter().map(|(k, v)| (k.clone(), s(&as_str(v)))).collect())));
+                            p.push((
+                                "map".into(),
+                                Value::Obj(es.iter().map(|(k, v)| (k.clone(), s(&as_str(v)))).collect()),
+                            ));
                         }
                         (Some(v), "string") => p.push(("string".into(), s(&as_str(v)))),
                         _ => {}
@@ -416,7 +445,12 @@ fn project_root(opts: &Opts) -> Option<std::path::PathBuf> {
 fn argocd_root() -> Option<std::path::PathBuf> {
     let cwd = std::env::current_dir().ok()?;
     let depth = std::env::var("ARGOCD_APP_SOURCE_PATH")
-        .map(|p| std::path::Path::new(&p).components().filter(|c| matches!(c, std::path::Component::Normal(_))).count())
+        .map(|p| {
+            std::path::Path::new(&p)
+                .components()
+                .filter(|c| matches!(c, std::path::Component::Normal(_)))
+                .count()
+        })
         .unwrap_or(0);
     cwd.ancestors().nth(depth).map(std::path::Path::to_path_buf)
 }

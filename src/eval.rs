@@ -70,7 +70,11 @@ impl Value {
     /// A short rendering for error messages.
     pub fn short(&self) -> String {
         let s = emit::to_json(self, false);
-        if s.chars().count() > 60 { format!("{}…", s.chars().take(57).collect::<String>()) } else { s }
+        if s.chars().count() > 60 {
+            format!("{}…", s.chars().take(57).collect::<String>())
+        } else {
+            s
+        }
     }
 }
 
@@ -132,13 +136,25 @@ pub fn run(
 
     let declared: Vec<&str> = items
         .iter()
-        .filter_map(|i| if let Item::Input { name, .. } = i { Some(name.as_str()) } else { None })
+        .filter_map(|i| {
+            if let Item::Input { name, .. } = i {
+                Some(name.as_str())
+            } else {
+                None
+            }
+        })
         .collect();
     let mut provided: HashMap<String, InputValue> = HashMap::new();
     for (name, v) in inputs {
         if !declared.contains(&name.as_str()) {
-            let hint = suggest(&name, declared.iter().copied()).map(|s| format!("; did you mean `{s}`?")).unwrap_or_default();
-            errs.push(EvalError { span: Span::default(), msg: format!("unknown input `{name}`{hint}"), trace: vec![] });
+            let hint = suggest(&name, declared.iter().copied())
+                .map(|s| format!("; did you mean `{s}`?"))
+                .unwrap_or_default();
+            errs.push(EvalError {
+                span: Span::default(),
+                msg: format!("unknown input `{name}`{hint}"),
+                trace: vec![],
+            });
         } else {
             provided.insert(name, v);
         }
@@ -147,18 +163,31 @@ pub fn run(
     // Like Starlark's `load` and ES imports: all imports are resolved before anything runs,
     // so a definition may use an import that appears below it (as the checker allows).
     for item in items {
-        if let Item::Import { form, path, attrs, span } = item {
+        if let Item::Import {
+            form,
+            path,
+            attrs,
+            span,
+        } = item
+        {
             ev.import_item(form, path, attrs, *span).map_err(|e| vec![e])?;
         }
     }
     for item in items {
         match item {
-            Item::Input { name, ty, default, span } => {
+            Item::Input {
+                name,
+                ty,
+                default,
+                span,
+            } => {
                 let t = ev.ctx.resolve(ty);
                 let value = match (provided.remove(name), default) {
                     (Some(iv), _) => ev.decode(iv, &t).map_err(|m| format!("input `{name}`: {m}")),
                     (None, Some(d)) => match ev.eval(d) {
-                        Ok(v) => ev.conform_top(v, &t).map_err(|m| format!("default for input `{name}`: {m}")),
+                        Ok(v) => ev
+                            .conform_top(v, &t)
+                            .map_err(|m| format!("default for input `{name}`: {m}")),
                         Err(e) => Err(e.msg),
                     },
                     (None, None) => Err(format!("missing required input `{name}` of type `{t}`")),
@@ -166,7 +195,11 @@ pub fn run(
                 match value {
                     Ok(v) => ev.globals.push((name.clone(), v)),
                     Err(msg) => {
-                        errs.push(EvalError { span: *span, msg, trace: vec![] });
+                        errs.push(EvalError {
+                            span: *span,
+                            msg,
+                            trace: vec![],
+                        });
                         ev.globals.push((name.clone(), Value::Null));
                     }
                 }
@@ -177,7 +210,8 @@ pub fn run(
                 let v = match ty {
                     Some(te) => {
                         let t = ev.ctx.resolve(te);
-                        ev.conform_top(v, &t).map_err(|m| vec![ev.error(*span, format!("`{name}`: {m}"))])?
+                        ev.conform_top(v, &t)
+                            .map_err(|m| vec![ev.error(*span, format!("`{name}`: {m}"))])?
                     }
                     None => v,
                 };
@@ -193,7 +227,11 @@ pub fn run(
                     v => vec![v],
                 };
                 let after = after.iter().map(|(a, _)| a.clone()).collect();
-                comps.push(Component { name: name.clone(), after, docs });
+                comps.push(Component {
+                    name: name.clone(),
+                    after,
+                    docs,
+                });
             }
             Item::Type { .. } | Item::Refine { .. } => {}
         }
@@ -220,8 +258,8 @@ fn levenshtein(a: &str, b: &str) -> usize {
     for (i, row) in d.iter_mut().enumerate() {
         row[0] = i;
     }
-    for j in 0..=b.len() {
-        d[0][j] = j;
+    for (j, cell) in d[0].iter_mut().enumerate() {
+        *cell = j;
     }
     for i in 1..=a.len() {
         for j in 1..=b.len() {
@@ -241,11 +279,19 @@ fn fmt_path(path: &[String]) -> String {
 
 fn path_key(k: &str) -> String {
     let plain = fmt_key(k);
-    if plain.starts_with('"') { format!("[{plain}]") } else { format!(".{k}") }
+    if plain.starts_with('"') {
+        format!("[{plain}]")
+    } else {
+        format!(".{k}")
+    }
 }
 
 fn at(path: &[String], msg: String) -> String {
-    if path.is_empty() { msg } else { format!("at `{}`: {msg}", fmt_path(path)) }
+    if path.is_empty() {
+        msg
+    } else {
+        format!("at `{}`: {msg}", fmt_path(path))
+    }
 }
 
 struct Evaluator {
@@ -279,7 +325,13 @@ impl Evaluator {
         }
     }
 
-    fn import_item(&mut self, form: &ImportForm, path: &str, attrs: &[(String, String, Span)], span: Span) -> Result<(), EvalError> {
+    fn import_item(
+        &mut self,
+        form: &ImportForm,
+        path: &str,
+        attrs: &[(String, String, Span)],
+        span: Span,
+    ) -> Result<(), EvalError> {
         match form {
             ImportForm::Namespace(ns) => self.import(ns, path, span),
             ImportForm::Named(names) => {
@@ -287,10 +339,10 @@ impl Evaluator {
                 self.import(&hidden, path, span)?;
                 for (orig, local, _) in names {
                     let q = format!("{hidden}.{orig}");
-                    if let Some(m) = self.imports.get(&hidden) {
-                        if m.borrow().fns.contains_key(orig) || m.borrow().fn_aliases.contains_key(orig) {
-                            self.fn_aliases.insert(local.clone(), q.clone());
-                        }
+                    if let Some(m) = self.imports.get(&hidden)
+                        && (m.borrow().fns.contains_key(orig) || m.borrow().fn_aliases.contains_key(orig))
+                    {
+                        self.fn_aliases.insert(local.clone(), q.clone());
                     }
                     if let Some(v) = self.lookup_qualified(&q) {
                         self.globals.push((local.clone(), v));
@@ -299,7 +351,10 @@ impl Evaluator {
                 Ok(())
             }
             ImportForm::Default(x) => {
-                let kind = attrs.iter().find(|(k, _, _)| k == "type").map_or("", |(_, v, _)| v.as_str());
+                let kind = attrs
+                    .iter()
+                    .find(|(k, _, _)| k == "type")
+                    .map_or("", |(_, v, _)| v.as_str());
                 let full = crate::modules::resolve_import(self.base.as_deref(), self.root.as_deref(), path)
                     .map_err(|m| self.error(span, m))?;
                 let v = crate::modules::load_data(&full, kind).map_err(|m| self.error(span, m))?;
@@ -321,9 +376,18 @@ impl Evaluator {
         let mut sub = Evaluator::new(checked.outcome.ctx.clone());
         sub.root = self.root.clone();
         sub.base = full.canonicalize().ok().and_then(|p| p.parent().map(Path::to_path_buf));
-        let in_module = |e: EvalError| EvalError { msg: format!("in module `{ns}` ({}): {}", path, e.msg), ..e };
+        let in_module = |e: EvalError| EvalError {
+            msg: format!("in module `{ns}` ({}): {}", path, e.msg),
+            ..e
+        };
         for item in &module.items {
-            if let Item::Import { form, path, attrs, span } = item {
+            if let Item::Import {
+                form,
+                path,
+                attrs,
+                span,
+            } = item
+            {
                 sub.import_item(form, path, attrs, *span).map_err(in_module)?;
             }
         }
@@ -335,7 +399,8 @@ impl Evaluator {
                     let v = match ty {
                         Some(te) => {
                             let t = sub.ctx.resolve(te);
-                            sub.conform_top(v, &t).map_err(|m| in_module(sub.error(*span, format!("`{name}`: {m}"))))?
+                            sub.conform_top(v, &t)
+                                .map_err(|m| in_module(sub.error(*span, format!("`{name}`: {m}"))))?
                         }
                         None => v,
                     };
@@ -359,7 +424,11 @@ impl Evaluator {
     }
 
     fn error(&self, span: Span, msg: impl Into<String>) -> EvalError {
-        EvalError { span, msg: msg.into(), trace: self.trace.clone() }
+        EvalError {
+            span,
+            msg: msg.into(),
+            trace: self.trace.clone(),
+        }
     }
 
     fn lookup(&self, name: &str) -> Option<&Value> {
@@ -397,7 +466,10 @@ impl Evaluator {
                         Ty::Record(r) => r.get(&k).map_or(Ty::Json, |f| f.ty.clone()),
                         _ => Ty::Json,
                     };
-                    out.push((k.clone(), self.decode_raw(x, &vt).map_err(|m| format!("key `{k}`: {m}"))?));
+                    out.push((
+                        k.clone(),
+                        self.decode_raw(x, &vt).map_err(|m| format!("key `{k}`: {m}"))?,
+                    ));
                 }
                 self.conform_top(Value::Obj(out), t)
             }
@@ -436,7 +508,10 @@ impl Evaluator {
         match t {
             Ty::Alias(n) => {
                 if !self.ctx.aliases.contains_key(n) {
-                    let te = TypeExpr { kind: TypeKind::Named(n.clone()), span: Span::default() };
+                    let te = TypeExpr {
+                        kind: TypeKind::Named(n.clone()),
+                        span: Span::default(),
+                    };
                     self.ctx.resolve(&te);
                 }
                 let inner = self.ctx.unfold(t);
@@ -446,14 +521,44 @@ impl Evaluator {
             Ty::Error | Ty::Json => Ok(v),
             Ty::Never => Err(at(path, format!("no value is allowed here, got {}", v.short()))),
             Ty::Lit(l) => {
-                if v.loose_eq(&Value::from_lit(l)) { Ok(v) } else { Err(mismatch(&v, t, path)) }
+                if v.loose_eq(&Value::from_lit(l)) {
+                    Ok(v)
+                } else {
+                    Err(mismatch(&v, t, path))
+                }
             }
-            Ty::Bool => if matches!(v, Value::Bool(_)) { Ok(v) } else { Err(mismatch(&v, t, path)) },
-            Ty::Int => if matches!(v, Value::Int(_)) { Ok(v) } else { Err(mismatch(&v, t, path)) },
-            Ty::Float => if matches!(v, Value::Int(_) | Value::Float(_)) { Ok(v) } else { Err(mismatch(&v, t, path)) },
-            Ty::Str => if matches!(v, Value::Str(_)) { Ok(v) } else { Err(mismatch(&v, t, path)) },
+            Ty::Bool => {
+                if matches!(v, Value::Bool(_)) {
+                    Ok(v)
+                } else {
+                    Err(mismatch(&v, t, path))
+                }
+            }
+            Ty::Int => {
+                if matches!(v, Value::Int(_)) {
+                    Ok(v)
+                } else {
+                    Err(mismatch(&v, t, path))
+                }
+            }
+            Ty::Float => {
+                if matches!(v, Value::Int(_) | Value::Float(_)) {
+                    Ok(v)
+                } else {
+                    Err(mismatch(&v, t, path))
+                }
+            }
+            Ty::Str => {
+                if matches!(v, Value::Str(_)) {
+                    Ok(v)
+                } else {
+                    Err(mismatch(&v, t, path))
+                }
+            }
             Ty::List(et) => {
-                let Value::List(xs) = v else { return Err(mismatch(&v, t, path)) };
+                let Value::List(xs) = v else {
+                    return Err(mismatch(&v, t, path));
+                };
                 let mut out = Vec::with_capacity(xs.len());
                 for (i, x) in xs.into_iter().enumerate() {
                     path.push(format!("[{i}]"));
@@ -463,9 +568,14 @@ impl Evaluator {
                 Ok(Value::List(out))
             }
             Ty::Tuple(ts) => {
-                let Value::List(xs) = v else { return Err(mismatch(&v, t, path)) };
+                let Value::List(xs) = v else {
+                    return Err(mismatch(&v, t, path));
+                };
                 if xs.len() != ts.len() {
-                    return Err(at(path, format!("expected {} elements (`{t}`), got {}", ts.len(), xs.len())));
+                    return Err(at(
+                        path,
+                        format!("expected {} elements (`{t}`), got {}", ts.len(), xs.len()),
+                    ));
                 }
                 let mut out = Vec::with_capacity(xs.len());
                 for (i, (x, et)) in xs.into_iter().zip(ts).enumerate() {
@@ -476,7 +586,9 @@ impl Evaluator {
                 Ok(Value::List(out))
             }
             Ty::Map(vt) => {
-                let Value::Obj(es) = v else { return Err(mismatch(&v, t, path)) };
+                let Value::Obj(es) = v else {
+                    return Err(mismatch(&v, t, path));
+                };
                 let mut out = Vec::with_capacity(es.len());
                 for (k, x) in es {
                     path.push(path_key(&k));
@@ -519,10 +631,17 @@ impl Evaluator {
                     Ok(_) => {
                         // Name the conjunct that failed, not the whole predicate.
                         self.locals.push(("self".to_string(), v.clone()));
-                        let failed = p.conjuncts().into_iter().find(|c| self.eval(c).ok() != Some(Value::Bool(true))).cloned();
+                        let failed = p
+                            .conjuncts()
+                            .into_iter()
+                            .find(|c| self.eval(c).ok() != Some(Value::Bool(true)))
+                            .cloned();
                         self.locals.pop();
                         let shown = failed.unwrap_or_else(|| p.clone());
-                        Err(at(path, format!("{} does not satisfy `{shown}`{required_by}", v.short())))
+                        Err(at(
+                            path,
+                            format!("{} does not satisfy `{shown}`{required_by}", v.short()),
+                        ))
                     }
                     Err(e) => Err(at(path, format!("checking `{p}` failed: {}", e.msg))),
                 }
@@ -532,12 +651,14 @@ impl Evaluator {
 
     /// Whether `v` is the same broad kind of value as type `t` accepts (for picking error messages).
     fn same_kind(&self, v: &Value, t: &Ty) -> bool {
-        match (v, self.ctx.shape(t)) {
-            (Value::Obj(_), Ty::Record(_) | Ty::Map(_)) => true,
-            (Value::List(_), Ty::List(_) | Ty::Tuple(_)) => true,
-            (Value::Str(_), Ty::Str) | (Value::Int(_), Ty::Int | Ty::Float) | (Value::Float(_), Ty::Float) => true,
-            _ => false,
-        }
+        matches!(
+            (v, self.ctx.shape(t)),
+            (Value::Obj(_), Ty::Record(_) | Ty::Map(_))
+                | (Value::List(_), Ty::List(_) | Ty::Tuple(_))
+                | (Value::Str(_), Ty::Str)
+                | (Value::Int(_), Ty::Int | Ty::Float)
+                | (Value::Float(_), Ty::Float)
+        )
     }
 
     fn conform_record(
@@ -550,15 +671,18 @@ impl Evaluator {
     ) -> Result<Value, String> {
         let shown = alias.map_or_else(|| t.to_string(), str::to_string);
         let Value::Obj(entries) = v else {
-            return Err(at(path, format!("expected `{shown}`, got {} ({})", v.short(), v.kind())));
+            return Err(at(
+                path,
+                format!("expected `{shown}`, got {} ({})", v.short(), v.kind()),
+            ));
         };
-        if !r.open {
-            if let Some((k, _)) = entries.iter().find(|(k, _)| r.get(k).is_none()) {
-                let hint = suggest(k, r.fields.iter().map(|f| f.name.as_str()))
-                    .map(|s| format!("; did you mean `{s}`?"))
-                    .unwrap_or_default();
-                return Err(at(path, format!("unknown field `{k}` in `{shown}`{hint}")));
-            }
+        if !r.open
+            && let Some((k, _)) = entries.iter().find(|(k, _)| r.get(k).is_none())
+        {
+            let hint = suggest(k, r.fields.iter().map(|f| f.name.as_str()))
+                .map(|s| format!("; did you mean `{s}`?"))
+                .unwrap_or_default();
+            return Err(at(path, format!("unknown field `{k}` in `{shown}`{hint}")));
         }
         // Output order: fields that fill themselves in from a single-literal type
         // (`apiVersion`, `kind`) first, then the given fields in source order, then other defaults.
@@ -571,7 +695,10 @@ impl Evaluator {
             match &f.presence {
                 Presence::Required => {
                     path.pop();
-                    return Err(at(path, format!("missing required field `{}` (`{}`) in `{shown}`", f.name, f.ty)));
+                    return Err(at(
+                        path,
+                        format!("missing required field `{}` (`{}`) in `{shown}`", f.name, f.ty),
+                    ));
                 }
                 Presence::Optional => {}
                 Presence::Default(e) => {
@@ -622,7 +749,10 @@ impl Evaluator {
                 }
                 Ok(Value::Str(s))
             }
-            ExprKind::Var(n) => self.lookup(n).cloned().ok_or_else(|| self.error(e.span, format!("unknown variable `{n}`"))),
+            ExprKind::Var(n) => self
+                .lookup(n)
+                .cloned()
+                .ok_or_else(|| self.error(e.span, format!("unknown variable `{n}`"))),
             ExprKind::List(items) => {
                 let mut out = Vec::new();
                 for item in items {
@@ -639,10 +769,10 @@ impl Evaluator {
             ExprKind::Field(b, label, optional) => {
                 if let Some(q) = crate::check::qualified_name(e) {
                     let root = q.split('.').next().unwrap_or("");
-                    if self.lookup(root).is_none() {
-                        if let Some(v) = self.lookup_qualified(&q) {
-                            return Ok(v);
-                        }
+                    if self.lookup(root).is_none()
+                        && let Some(v) = self.lookup_qualified(&q)
+                    {
+                        return Ok(v);
                     }
                 }
                 let v = self.eval(b)?;
@@ -653,7 +783,10 @@ impl Evaluator {
                         .get(*i)
                         .cloned()
                         .ok_or_else(|| self.error(e.span, format!("index {i} out of bounds (length {})", xs.len()))),
-                    _ => Err(self.error(e.span, format!("cannot read `.{label}` of {} ({})", v.short(), v.kind()))),
+                    _ => Err(self.error(
+                        e.span,
+                        format!("cannot read `.{label}` of {} ({})", v.short(), v.kind()),
+                    )),
                 }
             }
             ExprKind::Index(b, i) => {
@@ -678,9 +811,10 @@ impl Evaluator {
             ExprKind::Unary(op, x) => {
                 let v = self.eval(x)?;
                 match (op, v) {
-                    (UnOp::Neg, Value::Int(i)) => {
-                        i.checked_neg().map(Value::Int).ok_or_else(|| self.error(e.span, "integer overflow"))
-                    }
+                    (UnOp::Neg, Value::Int(i)) => i
+                        .checked_neg()
+                        .map(Value::Int)
+                        .ok_or_else(|| self.error(e.span, "integer overflow")),
                     (UnOp::Neg, Value::Float(f)) => Ok(Value::Float(-f)),
                     (UnOp::Not, Value::Bool(b)) => Ok(Value::Bool(!b)),
                     (_, v) => Err(self.error(e.span, format!("invalid operand {}", v.short()))),
@@ -696,7 +830,9 @@ impl Evaluator {
                 let mut val = self.eval(v)?;
                 if let Some(te) = ty {
                     let t = self.ctx.resolve(te);
-                    val = self.conform_top(val, &t).map_err(|m| self.error(v.span, format!("`{n}`: {m}")))?;
+                    val = self
+                        .conform_top(val, &t)
+                        .map_err(|m| self.error(v.span, format!("`{n}`: {m}")))?;
                 }
                 self.locals.push((n.clone(), val));
                 let r = self.eval(body);
@@ -799,10 +935,14 @@ impl Evaluator {
                 .enumerate()
                 .map(|(i, x)| vec![(a.to_string(), Value::Int(i as i64)), (b.to_string(), x)])
                 .collect(),
-            (Value::Obj(es), None) => es.into_iter().map(|(k, _)| vec![(a.to_string(), Value::Str(k))]).collect(),
-            (Value::Obj(es), Some(b)) => {
-                es.into_iter().map(|(k, x)| vec![(a.to_string(), Value::Str(k)), (b.to_string(), x)]).collect()
-            }
+            (Value::Obj(es), None) => es
+                .into_iter()
+                .map(|(k, _)| vec![(a.to_string(), Value::Str(k))])
+                .collect(),
+            (Value::Obj(es), Some(b)) => es
+                .into_iter()
+                .map(|(k, x)| vec![(a.to_string(), Value::Str(k)), (b.to_string(), x)])
+                .collect(),
             (Value::Null, _) => vec![],
             (v, _) => return Err(self.error(src.span, format!("cannot iterate over {}", v.kind()))),
         };
@@ -877,7 +1017,8 @@ impl Evaluator {
             },
             PatKind::Record(fs, open) => match v {
                 Value::Obj(es) => {
-                    let keys_ok = *open || (es.len() == fs.len() && es.iter().all(|(k, _)| fs.iter().any(|(f, _)| f == k)));
+                    let keys_ok =
+                        *open || (es.len() == fs.len() && es.iter().all(|(k, _)| fs.iter().any(|(f, _)| f == k)));
                     keys_ok
                         && fs.iter().all(|(k, p)| {
                             let x = v.get(k).cloned().unwrap_or(Value::Null);
@@ -907,7 +1048,14 @@ impl Evaluator {
         }
         let a = self.eval(l)?;
         let b = self.eval(r)?;
-        let bad = || format!("operator `{}` cannot be applied to {} and {}", op.symbol(), a.short(), b.short());
+        let bad = || {
+            format!(
+                "operator `{}` cannot be applied to {} and {}",
+                op.symbol(),
+                a.short(),
+                b.short()
+            )
+        };
         Ok(match op {
             Eq => Value::Bool(a.loose_eq(&b)),
             Ne => Value::Bool(!a.loose_eq(&b)),
@@ -919,7 +1067,9 @@ impl Evaluator {
                         _ => None,
                     },
                 };
-                let Some(ord) = ord else { return Err(self.error(span, bad())) };
+                let Some(ord) = ord else {
+                    return Err(self.error(span, bad()));
+                };
                 Value::Bool(match op {
                     Lt => ord.is_lt(),
                     Le => ord.is_le(),
@@ -968,30 +1118,40 @@ impl Evaluator {
         self.call_values(name, vals, span)
     }
 
-    fn call_values(&mut self, name: &str, vals: Vec<(Option<String>, Value, Span)>, span: Span) -> Result<Value, EvalError> {
+    fn call_values(
+        &mut self,
+        name: &str,
+        vals: Vec<(Option<String>, Value, Span)>,
+        span: Span,
+    ) -> Result<Value, EvalError> {
         if let Some(target) = self.fn_aliases.get(name).cloned() {
             return self.call_values(&target, vals, span);
         }
         if let Some(f) = self.fns.get(name).cloned() {
             return self.call_user(&f, vals, span);
         }
-        if let Some((ns, rest)) = name.split_once('.') {
-            if let Some(m) = self.imports.get(ns).cloned() {
-                let r = m.borrow_mut().call_values(rest, vals, span);
-                return r.map_err(|mut e| {
-                    let mut trace = self.trace.clone();
-                    trace.push((name.to_string(), span));
-                    trace.extend(e.trace);
-                    e.trace = trace;
-                    e
-                });
-            }
+        if let Some((ns, rest)) = name.split_once('.')
+            && let Some(m) = self.imports.get(ns).cloned()
+        {
+            let r = m.borrow_mut().call_values(rest, vals, span);
+            return r.map_err(|mut e| {
+                let mut trace = self.trace.clone();
+                trace.push((name.to_string(), span));
+                trace.extend(e.trace);
+                e.trace = trace;
+                e
+            });
         }
         builtin(name, vals.into_iter().map(|(_, v, _)| v).collect())
             .map_err(|m| self.error(span, format!("{name}: {m}")))
     }
 
-    fn call_user(&mut self, f: &FnDecl, args: Vec<(Option<String>, Value, Span)>, span: Span) -> Result<Value, EvalError> {
+    fn call_user(
+        &mut self,
+        f: &FnDecl,
+        args: Vec<(Option<String>, Value, Span)>,
+        span: Span,
+    ) -> Result<Value, EvalError> {
         if self.trace.len() > 256 {
             return Err(self.error(span, "call depth limit exceeded"));
         }
@@ -1034,7 +1194,8 @@ impl Evaluator {
             match &f.ret {
                 Some(te) => {
                     let t = self.ctx.resolve(te);
-                    self.conform_top(v, &t).map_err(|m| self.error(f.body.span, format!("result of `{}`: {m}", f.name)))
+                    self.conform_top(v, &t)
+                        .map_err(|m| self.error(f.body.span, format!("result of `{}`: {m}", f.name)))
                 }
                 None => Ok(v),
             }
@@ -1092,8 +1253,26 @@ fn deep_merge(a: Value, b: Value, path: &mut Vec<String>) -> Result<Value, Strin
 // ---------- built-in functions (SPEC §5.4) ----------
 
 pub const BUILTINS: [&str; 20] = [
-    "len", "keys", "values", "str", "upper", "lower", "join", "split", "contains", "starts_with", "ends_with",
-    "replace", "matches", "min", "max", "to_json", "to_yaml", "b64encode", "error", "sort",
+    "len",
+    "keys",
+    "values",
+    "str",
+    "upper",
+    "lower",
+    "join",
+    "split",
+    "contains",
+    "starts_with",
+    "ends_with",
+    "replace",
+    "matches",
+    "min",
+    "max",
+    "to_json",
+    "to_yaml",
+    "b64encode",
+    "error",
+    "sort",
 ];
 
 /// Signature and one-line description of a built-in, for hover.
@@ -1126,7 +1305,10 @@ pub fn builtin_doc(name: &str) -> &'static str {
 fn builtin(name: &str, args: Vec<Value>) -> Result<Value, String> {
     use Value::*;
     let bad = |args: &[Value]| {
-        format!("invalid arguments ({})", args.iter().map(Value::kind).collect::<Vec<_>>().join(", "))
+        format!(
+            "invalid arguments ({})",
+            args.iter().map(Value::kind).collect::<Vec<_>>().join(", ")
+        )
     };
     Ok(match (name, args.as_slice()) {
         ("len", [Str(s)]) => Int(s.chars().count() as i64),
@@ -1139,7 +1321,10 @@ fn builtin(name: &str, args: Vec<Value>) -> Result<Value, String> {
         ("upper", [Str(s)]) => Str(s.to_uppercase()),
         ("lower", [Str(s)]) => Str(s.to_lowercase()),
         ("join", [List(xs), Str(sep)]) => {
-            let parts: Option<Vec<&str>> = xs.iter().map(|x| if let Str(s) = x { Some(s.as_str()) } else { None }).collect();
+            let parts: Option<Vec<&str>> = xs
+                .iter()
+                .map(|x| if let Str(s) = x { Some(s.as_str()) } else { None })
+                .collect();
             Str(parts.ok_or("join expects a list of strings")?.join(sep))
         }
         ("split", [Str(s), Str(sep)]) => List(s.split(sep.as_str()).map(|p| Str(p.to_string())).collect()),
@@ -1266,7 +1451,9 @@ fn apply_patch(v: Value, path: &[Seg], op: &Op, trail: &mut Vec<String>) -> Resu
             other => Err(at(trail, format!("`[]` needs a list or object, got {}", other.kind()))),
         },
         Seg::Index(n) => {
-            let Value::List(mut xs) = v else { return Err(at(trail, format!("`[{n}]` needs a list, got {}", v.kind()))) };
+            let Value::List(mut xs) = v else {
+                return Err(at(trail, format!("`[{n}]` needs a list, got {}", v.kind())));
+            };
             if *n >= xs.len() {
                 return Err(at(trail, format!("index {n} is out of bounds (length {})", xs.len())));
             }
@@ -1281,11 +1468,27 @@ fn apply_patch(v: Value, path: &[Seg], op: &Op, trail: &mut Vec<String>) -> Resu
             Ok(Value::List(xs))
         }
         Seg::Select(keys) => {
-            let sel = keys.iter().map(|(k, v)| format!("{}: {}", fmt_key(k), v.short())).collect::<Vec<_>>().join(", ");
-            let Value::List(xs) = v else { return Err(at(trail, format!("`[{sel}]` needs a list, got {}", v.kind()))) };
-            let matches = |x: &Value| keys.iter().all(|(k, want)| x.get(k).is_some_and(|got| got.loose_eq(want)));
+            let sel = keys
+                .iter()
+                .map(|(k, v)| format!("{}: {}", fmt_key(k), v.short()))
+                .collect::<Vec<_>>()
+                .join(", ");
+            let Value::List(xs) = v else {
+                return Err(at(trail, format!("`[{sel}]` needs a list, got {}", v.kind())));
+            };
+            let matches = |x: &Value| {
+                keys.iter()
+                    .all(|(k, want)| x.get(k).is_some_and(|got| got.loose_eq(want)))
+            };
             if !xs.iter().any(matches) {
-                return Err(format!("no element of `{}` matches `[{sel}]`", if trail.is_empty() { "the list".into() } else { fmt_path(trail).trim_start_matches('.').to_string() }));
+                return Err(format!(
+                    "no element of `{}` matches `[{sel}]`",
+                    if trail.is_empty() {
+                        "the list".into()
+                    } else {
+                        fmt_path(trail).trim_start_matches('.').to_string()
+                    }
+                ));
             }
             if rest.is_empty() && matches!(op, Op::Remove) {
                 return Ok(Value::List(xs.into_iter().filter(|x| !matches(x)).collect()));
@@ -1307,7 +1510,7 @@ fn apply_patch(v: Value, path: &[Seg], op: &Op, trail: &mut Vec<String>) -> Resu
 
 /// `+:`: lists append; objects follow JSON Merge Patch (RFC 7386): nested
 /// objects merge, `null` removes a key, anything else replaces.
-fn merge(a: Value, b: Value, trail: &mut Vec<String>) -> Result<Value, String> {
+fn merge(a: Value, b: Value, trail: &mut [String]) -> Result<Value, String> {
     match (a, b) {
         (Value::List(mut xs), Value::List(ys)) => {
             xs.extend(ys);

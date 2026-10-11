@@ -5,7 +5,11 @@ use crate::lexer::{StrPart, Tok, Token, lex};
 type PResult<T> = Result<T, Diag>;
 
 pub fn parse_program(src: &str) -> PResult<Vec<Item>> {
-    let mut p = Parser { toks: lex(src)?, pos: 0, no_struct: false };
+    let mut p = Parser {
+        toks: lex(src)?,
+        pos: 0,
+        no_struct: false,
+    };
     let mut items = Vec::new();
     while *p.peek() != Tok::Eof {
         items.push(p.item()?);
@@ -29,7 +33,10 @@ fn rebind(te: TypeExpr, name: &str) -> TypeExpr {
     match te.kind {
         TypeKind::Refine(base, pred) => {
             let this = Expr::var("self", pred.span);
-            TypeExpr { kind: TypeKind::Refine(base, pred.subst(name, &this)), span: te.span }
+            TypeExpr {
+                kind: TypeKind::Refine(base, pred.subst(name, &this)),
+                span: te.span,
+            }
         }
         kind => TypeExpr { kind, span: te.span },
     }
@@ -78,7 +85,11 @@ fn insert_member(members: &mut Vec<Member>, path: &[(String, Span)], value: Expr
         return;
     }
     let i = idx.unwrap_or_else(|| {
-        members.push(Member::Field(key.clone(), Expr::new(ExprKind::Object(Vec::new()), span), span));
+        members.push(Member::Field(
+            key.clone(),
+            Expr::new(ExprKind::Object(Vec::new()), span),
+            span,
+        ));
         members.len() - 1
     });
     insert_member(nested_members(members, i), &path[1..], value);
@@ -86,7 +97,14 @@ fn insert_member(members: &mut Vec<Member>, path: &[(String, Span)], value: Expr
 
 fn nested_members(members: &mut [Member], i: usize) -> &mut Vec<Member> {
     match &mut members[i] {
-        Member::Field(_, Expr { kind: ExprKind::Object(ms), .. }, _) => ms,
+        Member::Field(
+            _,
+            Expr {
+                kind: ExprKind::Object(ms),
+                ..
+            },
+            _,
+        ) => ms,
         _ => unreachable!("index points at an object-valued field"),
     }
 }
@@ -123,7 +141,10 @@ impl Parser {
     }
 
     fn err<T>(&self, expected: &str) -> PResult<T> {
-        Err(Diag::new(self.span(), format!("expected {expected}, found {}", self.peek().describe())))
+        Err(Diag::new(
+            self.span(),
+            format!("expected {expected}, found {}", self.peek().describe()),
+        ))
     }
 
     fn expect(&mut self, t: &Tok) -> PResult<()> {
@@ -194,7 +215,12 @@ impl Parser {
             t if t.keyword_text().is_some() => t.keyword_text().unwrap().to_string(),
             Tok::Str(_) => match self.plain_str() {
                 Some(s) => s,
-                None => return Err(Diag::new(span, "object keys cannot use interpolation; use `[expr]: value`")),
+                None => {
+                    return Err(Diag::new(
+                        span,
+                        "object keys cannot use interpolation; use `[expr]: value`",
+                    ));
+                }
             },
             _ => return self.err("key"),
         };
@@ -245,7 +271,9 @@ impl Parser {
                 if !self.eat(&kw("from")) {
                     return self.err("`from`");
                 }
-                let Some(path) = self.plain_str() else { return self.err("a file path string") };
+                let Some(path) = self.plain_str() else {
+                    return self.err("a file path string");
+                };
                 self.bump();
                 let mut attrs = Vec::new();
                 if self.eat(&kw("with")) {
@@ -256,7 +284,9 @@ impl Parser {
                         }
                         let (k, sp) = self.key()?;
                         self.expect(&Tok::Colon)?;
-                        let Some(v) = self.plain_str() else { return self.err("a string attribute value") };
+                        let Some(v) = self.plain_str() else {
+                            return self.err("a string attribute value");
+                        };
                         self.bump();
                         attrs.push((k, v, sp));
                         if !self.eat(&Tok::Comma) {
@@ -265,7 +295,12 @@ impl Parser {
                         }
                     }
                 }
-                Ok(Item::Import { form, path, attrs, span })
+                Ok(Item::Import {
+                    form,
+                    path,
+                    attrs,
+                    span,
+                })
             }
             Tok::Ident(r) if r == "refine" && matches!(self.peek_at(1), Tok::Ident(_)) => {
                 self.bump();
@@ -280,7 +315,11 @@ impl Parser {
                 self.bump();
                 let name = self.dotted_ident()?;
                 self.expect(&Tok::Eq)?;
-                Ok(Item::Type { name, ty: self.ty()?, span })
+                Ok(Item::Type {
+                    name,
+                    ty: self.ty()?,
+                    span,
+                })
             }
             Tok::Input => {
                 self.bump();
@@ -288,14 +327,28 @@ impl Parser {
                 self.expect(&Tok::Colon)?;
                 let ty = rebind(self.ty()?, &name);
                 let default = if self.eat(&Tok::Eq) { Some(self.expr_s()?) } else { None };
-                Ok(Item::Input { name, ty, default, span })
+                Ok(Item::Input {
+                    name,
+                    ty,
+                    default,
+                    span,
+                })
             }
             Tok::Let => {
                 self.bump();
                 let (name, _) = self.ident()?;
-                let ty = if self.eat(&Tok::Colon) { Some(rebind(self.ty()?, &name)) } else { None };
+                let ty = if self.eat(&Tok::Colon) {
+                    Some(rebind(self.ty()?, &name))
+                } else {
+                    None
+                };
                 self.expect(&Tok::Eq)?;
-                Ok(Item::Let { name, ty, value: self.expr_s()?, span })
+                Ok(Item::Let {
+                    name,
+                    ty,
+                    value: self.expr_s()?,
+                    span,
+                })
             }
             Tok::Fn => {
                 self.bump();
@@ -310,7 +363,12 @@ impl Parser {
                     self.expect(&Tok::Colon)?;
                     let ty = rebind(self.ty()?, &p);
                     let default = if self.eat(&Tok::Eq) { Some(self.expr_s()?) } else { None };
-                    params.push(Param { name: p, ty, default, span: ps });
+                    params.push(Param {
+                        name: p,
+                        ty,
+                        default,
+                        span: ps,
+                    });
                     if !self.eat(&Tok::Comma) {
                         self.expect(&Tok::RParen)?;
                         break;
@@ -319,7 +377,13 @@ impl Parser {
                 let ret = if self.eat(&Tok::Arrow) { Some(self.ty()?) } else { None };
                 self.expect(&Tok::Eq)?;
                 let body = self.expr_s()?;
-                Ok(Item::Fn(FnDecl { name, params, ret, body, span }))
+                Ok(Item::Fn(FnDecl {
+                    name,
+                    params,
+                    ret,
+                    body,
+                    span,
+                }))
             }
             Tok::Export => {
                 self.bump();
@@ -341,7 +405,12 @@ impl Parser {
                     }
                     self.expect(&Tok::Eq)?;
                 }
-                Ok(Item::Export { name, after, value: self.expr_s()?, span })
+                Ok(Item::Export {
+                    name,
+                    after,
+                    value: self.expr_s()?,
+                    span,
+                })
             }
             _ => self.err("`import`, `type`, `refine`, `input`, `let`, `fn` or `export`"),
         }
@@ -359,14 +428,20 @@ impl Parser {
         let base = if members.len() == 1 {
             members.pop().unwrap()
         } else {
-            TypeExpr { kind: TypeKind::Union(members), span }
+            TypeExpr {
+                kind: TypeKind::Union(members),
+                span,
+            }
         };
         if self.eat(&Tok::Where) {
             let pred = self.with_struct(false, |p| p.expr())?;
             if *self.peek() == Tok::Pipe {
                 return self.err("end of refined type (wrap refined union members in parentheses)");
             }
-            return Ok(TypeExpr { kind: TypeKind::Refine(Box::new(base), pred), span });
+            return Ok(TypeExpr {
+                kind: TypeKind::Refine(Box::new(base), pred),
+                span,
+            });
         }
         Ok(base)
     }
@@ -378,7 +453,10 @@ impl Parser {
         while matches!(self.peek(), Tok::Ident(w) if w == "with") && *self.peek_at(1) == Tok::LBrace {
             self.bump();
             let patches = self.patches()?;
-            te = TypeExpr { kind: TypeKind::With(Box::new(te), patches), span };
+            te = TypeExpr {
+                kind: TypeKind::With(Box::new(te), patches),
+                span,
+            };
         }
         Ok(te)
     }
@@ -397,7 +475,13 @@ impl Parser {
             let last = path
                 .iter()
                 .rev()
-                .find_map(|s| if let PathSeg::Field(k) = s { Some(k.clone()) } else { None })
+                .find_map(|s| {
+                    if let PathSeg::Field(k) = s {
+                        Some(k.clone())
+                    } else {
+                        None
+                    }
+                })
                 .unwrap_or_default();
             let op = if remove {
                 PatchOp::Remove
@@ -422,7 +506,11 @@ impl Parser {
     /// `a.b[].c[2].d[name: "x"]` in a `with` entry.
     fn patch_path(&mut self) -> PResult<Vec<PathSeg>> {
         // A path may start with a selector when patching a list: `[kind: "Service"].spec...`.
-        let mut path = if *self.peek() == Tok::LBracket { Vec::new() } else { vec![PathSeg::Field(self.key()?.0)] };
+        let mut path = if *self.peek() == Tok::LBracket {
+            Vec::new()
+        } else {
+            vec![PathSeg::Field(self.key()?.0)]
+        };
         loop {
             if self.eat(&Tok::Dot) {
                 path.push(PathSeg::Field(self.key()?.0));
@@ -431,13 +519,13 @@ impl Parser {
                     path.push(PathSeg::Each);
                     continue;
                 }
-                if let (Tok::Int(n), Tok::RBracket) = (self.peek().clone(), self.peek_at(1)) {
-                    if n >= 0 {
-                        self.bump();
-                        self.bump();
-                        path.push(PathSeg::Index(n as usize));
-                        continue;
-                    }
+                if let (Tok::Int(n), Tok::RBracket) = (self.peek().clone(), self.peek_at(1))
+                    && n >= 0
+                {
+                    self.bump();
+                    self.bump();
+                    path.push(PathSeg::Index(n as usize));
+                    continue;
                 }
                 let mut keys = Vec::new();
                 loop {
@@ -594,7 +682,13 @@ impl Parser {
             self.expect(&Tok::Colon)?;
             let ty = rebind(self.ty()?, &name);
             let default = if self.eat(&Tok::Eq) { Some(self.expr_s()?) } else { None };
-            fields.push(FieldDecl { name, ty, optional, default, span });
+            fields.push(FieldDecl {
+                name,
+                ty,
+                optional,
+                default,
+                span,
+            });
             if !self.eat(&Tok::Comma) {
                 self.expect(&Tok::RBrace)?;
                 break;
@@ -639,19 +733,29 @@ impl Parser {
         }
         self.bump();
         let els = self.expr()?;
-        Ok(Expr::new(ExprKind::If(Box::new(cond), Box::new(then), Box::new(els)), span))
+        Ok(Expr::new(
+            ExprKind::If(Box::new(cond), Box::new(then), Box::new(els)),
+            span,
+        ))
     }
 
     fn let_expr(&mut self) -> PResult<Expr> {
         let span = self.span();
         self.expect(&Tok::Let)?;
         let (name, _) = self.ident()?;
-        let ty = if self.eat(&Tok::Colon) { Some(rebind(self.ty()?, &name)) } else { None };
+        let ty = if self.eat(&Tok::Colon) {
+            Some(rebind(self.ty()?, &name))
+        } else {
+            None
+        };
         self.expect(&Tok::Eq)?;
         let value = self.expr_s()?;
         self.expect(&Tok::Semi)?;
         let body = self.expr()?;
-        Ok(Expr::new(ExprKind::Let(name, ty.map(Box::new), Box::new(value), Box::new(body)), span))
+        Ok(Expr::new(
+            ExprKind::Let(name, ty.map(Box::new), Box::new(value), Box::new(body)),
+            span,
+        ))
     }
 
     fn bin(&mut self, min: u8) -> PResult<Expr> {
@@ -663,7 +767,11 @@ impl Parser {
             }
             self.bump();
             // `a ?? if c then x else y` and similar: allow if/let on the right.
-            let rhs = if matches!(self.peek(), Tok::If | Tok::Let) { self.expr()? } else { self.bin(p + 1)? };
+            let rhs = if matches!(self.peek(), Tok::If | Tok::Let) {
+                self.expr()?
+            } else {
+                self.bin(p + 1)?
+            };
             lhs = Expr::binary(op, lhs, rhs);
         }
         Ok(lhs)
@@ -812,7 +920,11 @@ impl Parser {
             match part {
                 StrPart::Lit(s) => out.push(InterpPart::Lit(s)),
                 StrPart::Interp(toks) => {
-                    let mut sub = Parser { toks, pos: 0, no_struct: false };
+                    let mut sub = Parser {
+                        toks,
+                        pos: 0,
+                        no_struct: false,
+                    };
                     let e = sub.expr()?;
                     if *sub.peek() != Tok::Eof {
                         return sub.err("`)` to close the interpolation");
@@ -840,7 +952,10 @@ impl Parser {
                 }
                 _ => None,
             };
-            args.push(Arg { name, value: self.expr_s()? });
+            args.push(Arg {
+                name,
+                value: self.expr_s()?,
+            });
             if !self.eat(&Tok::Comma) {
                 self.expect(&Tok::RParen)?;
                 break;
@@ -880,10 +995,16 @@ impl Parser {
                 let inner = self.list_item()?;
                 if self.eat(&Tok::Else) {
                     let ListItem::Elem(then) = inner else {
-                        return Err(Diag::new(span, "an `if` with `else` in a list must produce a single element"));
+                        return Err(Diag::new(
+                            span,
+                            "an `if` with `else` in a list must produce a single element",
+                        ));
                     };
                     let els = self.expr_s()?;
-                    return Ok(ListItem::Elem(Expr::new(ExprKind::If(Box::new(cond), Box::new(then), Box::new(els)), span)));
+                    return Ok(ListItem::Elem(Expr::new(
+                        ExprKind::If(Box::new(cond), Box::new(then), Box::new(els)),
+                        span,
+                    )));
                 }
                 Ok(ListItem::If(cond, Box::new(inner)))
             }
@@ -899,7 +1020,11 @@ impl Parser {
     /// `x in e =>` or `k, v in e =>` (after `for`).
     fn for_head(&mut self) -> PResult<(String, Option<String>, Expr)> {
         let (a, _) = self.ident()?;
-        let b = if self.eat(&Tok::Comma) { Some(self.ident()?.0) } else { None };
+        let b = if self.eat(&Tok::Comma) {
+            Some(self.ident()?.0)
+        } else {
+            None
+        };
         self.expect(&Tok::In)?;
         let src = self.expr_s()?;
         self.expect(&Tok::FatArrow)?;
@@ -1098,7 +1223,10 @@ impl Parser {
                     let pat = if self.eat(&Tok::Colon) {
                         self.pat()?
                     } else {
-                        Pat { kind: PatKind::Bind(name.clone()), span }
+                        Pat {
+                            kind: PatKind::Bind(name.clone()),
+                            span,
+                        }
                     };
                     fields.push((name, pat));
                     if !self.eat(&Tok::Comma) {

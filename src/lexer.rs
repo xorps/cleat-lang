@@ -148,7 +148,12 @@ pub struct Token {
 }
 
 pub fn lex(src: &str) -> Result<Vec<Token>, Diag> {
-    let mut lx = Lexer { cs: src.chars().collect(), i: 0, line: 1, col: 1 };
+    let mut lx = Lexer {
+        cs: src.chars().collect(),
+        i: 0,
+        line: 1,
+        col: 1,
+    };
     lx.tokens(false)
 }
 
@@ -165,7 +170,10 @@ impl Lexer {
     }
 
     fn span(&self) -> Span {
-        Span { line: self.line, col: self.col }
+        Span {
+            line: self.line,
+            col: self.col,
+        }
     }
 
     fn bump(&mut self) -> char {
@@ -212,7 +220,11 @@ impl Lexer {
                 while self.peek(0).is_some_and(|c| c.is_ascii_alphanumeric() || c == '_') {
                     s.push(self.bump());
                 }
-                KEYWORDS.iter().find(|(k, _)| *k == s).map(|(_, t)| t.clone()).unwrap_or(Tok::Ident(s))
+                KEYWORDS
+                    .iter()
+                    .find(|(k, _)| *k == s)
+                    .map(|(_, t)| t.clone())
+                    .unwrap_or(Tok::Ident(s))
             } else if c.is_ascii_digit() {
                 self.number(&out, span)?
             } else if c == '"' {
@@ -227,7 +239,10 @@ impl Lexer {
             }
             out.push(Token { tok, span });
         }
-        out.push(Token { tok: Tok::Eof, span: self.span() });
+        out.push(Token {
+            tok: Tok::Eof,
+            span: self.span(),
+        });
         Ok(out)
     }
 
@@ -240,7 +255,13 @@ impl Lexer {
             }
         }
         // After `.`, digits are a tuple index: `x.0.1` is not `x.(0.1)`.
-        let after_dot = matches!(out.last(), Some(Token { tok: Tok::Dot | Tok::QDot, .. }));
+        let after_dot = matches!(
+            out.last(),
+            Some(Token {
+                tok: Tok::Dot | Tok::QDot,
+                ..
+            })
+        );
         let mut is_float = false;
         if !after_dot && self.peek(0) == Some('.') && self.peek(1).is_some_and(|d| d.is_ascii_digit()) {
             is_float = true;
@@ -263,9 +284,13 @@ impl Lexer {
             }
         }
         if is_float {
-            s.parse().map(Tok::Float).map_err(|_| Diag::new(span, "invalid float literal"))
+            s.parse()
+                .map(Tok::Float)
+                .map_err(|_| Diag::new(span, "invalid float literal"))
         } else {
-            s.parse().map(Tok::Int).map_err(|_| Diag::new(span, "integer literal out of range"))
+            s.parse()
+                .map(Tok::Int)
+                .map_err(|_| Diag::new(span, "integer literal out of range"))
         }
     }
 
@@ -286,7 +311,12 @@ impl Lexer {
             match self.peek(0) {
                 None if !quoted => break,
                 None => return Err(Diag::new(span, "unterminated string literal")),
-                Some('\n') if quoted => return Err(Diag::new(span, "unterminated string literal (use `\"\"\"` for multi-line strings)")),
+                Some('\n') if quoted => {
+                    return Err(Diag::new(
+                        span,
+                        "unterminated string literal (use `\"\"\"` for multi-line strings)",
+                    ));
+                }
                 Some('"') if quoted => {
                     self.bump();
                     break;
@@ -340,13 +370,20 @@ impl Lexer {
                 self.bump();
                 self.bump();
             }
-            _ => return Err(Diag::new(span, "a `\"\"\"` string starts on the line after the opening quotes")),
+            _ => {
+                return Err(Diag::new(
+                    span,
+                    "a `\"\"\"` string starts on the line after the opening quotes",
+                ));
+            }
         }
         // Collect raw lines up to the closing quotes; `\"""` does not close.
         let mut raw = String::new();
         let closing_indent;
         loop {
-            let Some(c) = self.peek(0) else { return Err(Diag::new(span, "unterminated `\"\"\"` string")) };
+            let Some(c) = self.peek(0) else {
+                return Err(Diag::new(span, "unterminated `\"\"\"` string"));
+            };
             if c == '\\' {
                 raw.push(self.bump());
                 if let Some(next) = self.peek(0) {
@@ -380,12 +417,20 @@ impl Lexer {
                 Some(rest) => text.push_str(rest),
                 None if line.trim().is_empty() => {}
                 None => {
-                    return Err(Diag::new(span, "a line in a `\"\"\"` string is indented less than the closing quotes"));
+                    return Err(Diag::new(
+                        span,
+                        "a line in a `\"\"\"` string is indented less than the closing quotes",
+                    ));
                 }
             }
         }
         // Escapes and interpolation are processed on the dedented text.
-        let mut sub = Lexer { cs: text.chars().collect(), i: 0, line: span.line + 1, col: 1 };
+        let mut sub = Lexer {
+            cs: text.chars().collect(),
+            i: 0,
+            line: span.line + 1,
+            col: 1,
+        };
         sub.string_body(span, false)
     }
 

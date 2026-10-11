@@ -56,7 +56,11 @@ fn write_json(v: &Value, pretty: bool, indent: usize, out: &mut String) {
 }
 
 fn float(f: f64) -> String {
-    if f.is_finite() && f.fract() == 0.0 && f.abs() < 1e16 { format!("{f:.1}") } else { format!("{f}") }
+    if f.is_finite() && f.fract() == 0.0 && f.abs() < 1e16 {
+        format!("{f:.1}")
+    } else {
+        format!("{f}")
+    }
 }
 
 /// A JSON string literal, which is also a valid YAML double-quoted scalar.
@@ -157,8 +161,16 @@ fn yaml_scalar(v: &Value, indent: usize) -> String {
                 (s.as_str(), "-")
             };
             let pad = " ".repeat(indent);
-            let lines: Vec<String> =
-                body.split('\n').map(|l| if l.is_empty() { String::new() } else { format!("{pad}{l}") }).collect();
+            let lines: Vec<String> = body
+                .split('\n')
+                .map(|l| {
+                    if l.is_empty() {
+                        String::new()
+                    } else {
+                        format!("{pad}{l}")
+                    }
+                })
+                .collect();
             format!("|{chomp}\n{}", lines.join("\n"))
         }
         Value::Str(s) => yaml_str(s),
@@ -181,7 +193,9 @@ fn plain_ok(s: &str) -> bool {
     if s.is_empty() || s.trim() != s {
         return false;
     }
-    if s.starts_with(['-', '?', ':', ',', '[', ']', '{', '}', '#', '&', '*', '!', '|', '>', '\'', '"', '%', '@', '`']) {
+    if s.starts_with([
+        '-', '?', ':', ',', '[', ']', '{', '}', '#', '&', '*', '!', '|', '>', '\'', '"', '%', '@', '`',
+    ]) {
         return false;
     }
     if s.contains(": ") || s.contains(" #") || s.ends_with(':') || s.chars().any(|c| c.is_control()) {
@@ -191,13 +205,29 @@ fn plain_ok(s: &str) -> bool {
     let lower = s.to_ascii_lowercase();
     if matches!(
         lower.as_str(),
-        "null" | "~" | "true" | "false" | "yes" | "no" | "on" | "off" | "y" | "n" | ".inf" | "-.inf" | "+.inf" | ".nan" | "<<"
+        "null"
+            | "~"
+            | "true"
+            | "false"
+            | "yes"
+            | "no"
+            | "on"
+            | "off"
+            | "y"
+            | "n"
+            | ".inf"
+            | "-.inf"
+            | "+.inf"
+            | ".nan"
+            | "<<"
     ) {
         return false;
     }
     let numberish = s.trim_start_matches(['+', '-']);
     if numberish.starts_with(|c: char| c.is_ascii_digit() || c == '.')
-        && numberish.chars().all(|c| c.is_ascii_hexdigit() || "._:-+xXoO".contains(c))
+        && numberish
+            .chars()
+            .all(|c| c.is_ascii_hexdigit() || "._:-+xXoO".contains(c))
     {
         return false; // numbers, hex/octal, sexagesimal, dates, versions like 1.2.3
     }

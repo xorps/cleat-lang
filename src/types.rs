@@ -122,7 +122,14 @@ impl Ty {
             Ty::Alias(n) => Ty::Alias(f(n).unwrap_or_else(|| n.clone())),
             Ty::Refine(b, p) => Ty::Refine(Box::new(go(b)), p.clone()),
             Ty::Record(r) => Ty::Record(Rec {
-                fields: r.fields.iter().map(|fl| Field { ty: go(&fl.ty), ..fl.clone() }).collect(),
+                fields: r
+                    .fields
+                    .iter()
+                    .map(|fl| Field {
+                        ty: go(&fl.ty),
+                        ..fl.clone()
+                    })
+                    .collect(),
                 open: r.open,
             }),
             Ty::List(t) => Ty::List(Box::new(go(t))),
@@ -138,7 +145,14 @@ impl Ty {
         match self {
             Ty::Refine(b, p) => Ty::Refine(Box::new(go(b)), p.subst_many(map)),
             Ty::Record(r) => Ty::Record(Rec {
-                fields: r.fields.iter().map(|f| Field { ty: go(&f.ty), ..f.clone() }).collect(),
+                fields: r
+                    .fields
+                    .iter()
+                    .map(|f| Field {
+                        ty: go(&f.ty),
+                        ..f.clone()
+                    })
+                    .collect(),
                 open: r.open,
             }),
             Ty::List(t) => Ty::List(Box::new(go(t))),
@@ -199,10 +213,10 @@ impl Ty {
                         let q = if fl.presence == Presence::Optional { "?" } else { "" };
                         write!(f, "{}{q}: ", fmt_key(&fl.name))?;
                         fl.ty.fmt_nested(f, false)?;
-                        if let Presence::Default(e) = &fl.presence {
-                            if !matches!(fl.ty, Ty::Lit(_)) {
-                                write!(f, " = {e}")?;
-                            }
+                        if let Presence::Default(e) = &fl.presence
+                            && !matches!(fl.ty, Ty::Lit(_))
+                        {
+                            write!(f, " = {e}")?;
                         }
                     }
                     if r.open {
@@ -317,7 +331,9 @@ impl TypeCtx {
                     };
                     match self.patch(&t, &p.path, &op) {
                         Ok(n) => t = n,
-                        Err(m) => self.diags.push(Diag::new(p.span, format!("`{}`: {m}", fmt_path(&p.path)))),
+                        Err(m) => self
+                            .diags
+                            .push(Diag::new(p.span, format!("`{}`: {m}", fmt_path(&p.path)))),
                     }
                 }
                 t
@@ -326,7 +342,8 @@ impl TypeCtx {
                 let mut out: Vec<Field> = Vec::new();
                 for fd in fields {
                     if out.iter().any(|f| f.name == fd.name) {
-                        self.diags.push(Diag::new(fd.span, format!("duplicate field `{}`", fd.name)));
+                        self.diags
+                            .push(Diag::new(fd.span, format!("duplicate field `{}`", fd.name)));
                         continue;
                     }
                     let ty = self.resolve(&fd.ty);
@@ -334,7 +351,10 @@ impl TypeCtx {
                         (Some(_), true) => {
                             self.diags.push(Diag::new(
                                 fd.span,
-                                format!("field `{}` has a default, so it is already optional; remove the `?`", fd.name),
+                                format!(
+                                    "field `{}` has a default, so it is already optional; remove the `?`",
+                                    fd.name
+                                ),
                             ));
                             Presence::Optional
                         }
@@ -346,16 +366,24 @@ impl TypeCtx {
                             _ => Presence::Required,
                         },
                     };
-                    out.push(Field { name: fd.name.clone(), ty, presence });
+                    out.push(Field {
+                        name: fd.name.clone(),
+                        ty,
+                        presence,
+                    });
                 }
-                Ty::Record(Rec { fields: out, open: *open })
+                Ty::Record(Rec {
+                    fields: out,
+                    open: *open,
+                })
             }
         }
     }
 
     /// For `k8s.Event`, list the qualified names that end in `Event`; otherwise suggest a near miss.
     pub fn in_failed_namespace(&self, name: &str) -> bool {
-        name.split_once('.').is_some_and(|(ns, _)| self.failed_namespaces.contains(ns))
+        name.split_once('.')
+            .is_some_and(|(ns, _)| self.failed_namespaces.contains(ns))
     }
 
     pub fn unknown_type_message(&self, n: &str) -> String {
@@ -398,7 +426,9 @@ impl TypeCtx {
 
     /// Apply one `with` entry. Every operation narrows, so the result is a subtype of `t`.
     fn patch(&mut self, t: &Ty, path: &[PathSeg], op: &Op) -> Result<Ty, String> {
-        let Some((seg, rest)) = path.split_first() else { return self.patch_here(t, op) };
+        let Some((seg, rest)) = path.split_first() else {
+            return self.patch_here(t, op);
+        };
         if matches!(seg, PathSeg::Index(_) | PathSeg::Select(_)) {
             return Err(format!("`{seg}` selects values; in a type, use `[]` for all elements"));
         }
@@ -428,12 +458,17 @@ impl TypeCtx {
                     return Ok(Ty::Record(r));
                 }
                 let Some(i) = r.fields.iter().position(|f| f.name == *k) else {
-                    if r.open && rest.is_empty() {
-                        if let Op::Set(ty, d) = op {
-                            let presence = d.clone().map_or(Presence::Optional, Presence::Default);
-                            r.fields.push(Field { name: k.clone(), ty: ty.clone(), presence });
-                            return Ok(Ty::Record(r));
-                        }
+                    if r.open
+                        && rest.is_empty()
+                        && let Op::Set(ty, d) = op
+                    {
+                        let presence = d.clone().map_or(Presence::Optional, Presence::Default);
+                        r.fields.push(Field {
+                            name: k.clone(),
+                            ty: ty.clone(),
+                            presence,
+                        });
+                        return Ok(Ty::Record(r));
                     }
                     let hint = crate::eval::suggest(k, r.fields.iter().map(|f| f.name.as_str()))
                         .map(|s| format!("; did you mean `{s}`?"))
@@ -465,7 +500,10 @@ impl TypeCtx {
     fn patch_here(&self, old: &Ty, op: &Op) -> Result<Ty, String> {
         match op {
             Op::Set(ty, _) if self.sub(ty, old, Mode::Erased) => Ok(ty.clone()),
-            Op::Set(ty, _) => Err(format!("`{ty}` is not a subtype of `{}`; `with` can only narrow types", self.norm(old))),
+            Op::Set(ty, _) => Err(format!(
+                "`{ty}` is not a subtype of `{}`; `with` can only narrow types",
+                self.norm(old)
+            )),
             Op::Where(p) => Ok(self.norm(&Ty::Refine(Box::new(old.clone()), p.clone()))),
             Op::Remove => Err("`-` removes a field; use it on a field path".into()),
         }
@@ -473,7 +511,9 @@ impl TypeCtx {
 
     /// The type at a `with` path (for checking `where` predicates).
     pub fn type_at(&self, t: &Ty, path: &[PathSeg]) -> Option<Ty> {
-        let Some((seg, rest)) = path.split_first() else { return Some(t.clone()) };
+        let Some((seg, rest)) = path.split_first() else {
+            return Some(t.clone());
+        };
         let non_null: Vec<Ty> = match self.unfold(&self.norm(t)) {
             Ty::Union(ms) => ms.into_iter().filter(|m| *m != Ty::null()).collect(),
             other => vec![other],
@@ -558,7 +598,11 @@ impl TypeCtx {
             }
             Ty::Tuple(ts) => {
                 let ts: Vec<Ty> = ts.iter().map(|t| self.norm(t)).collect();
-                if ts.contains(&Ty::Never) { Ty::Never } else { Ty::Tuple(ts) }
+                if ts.contains(&Ty::Never) {
+                    Ty::Never
+                } else {
+                    Ty::Tuple(ts)
+                }
             }
             Ty::List(t) => Ty::List(Box::new(self.norm(t))),
             Ty::Map(t) => Ty::Map(Box::new(self.norm(t))),
@@ -632,7 +676,10 @@ impl TypeCtx {
                 r.fields.iter().all(|f| self.sub_n(&f.ty, y, mode)) && (!r.open || self.sub_n(&Json, y, mode))
             }
             (Map(x), Record(r)) => {
-                r.open && r.fields.iter().all(|f| f.presence != Presence::Required && self.sub_n(x, &f.ty, mode))
+                r.open
+                    && r.fields
+                        .iter()
+                        .all(|f| f.presence != Presence::Required && self.sub_n(x, &f.ty, mode))
             }
             (Record(ra), Record(rb)) => {
                 if ra.open && !rb.open {

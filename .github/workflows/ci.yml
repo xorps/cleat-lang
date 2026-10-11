@@ -1,0 +1,67 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+  schedule:
+    - cron: "0 5 * * 1" # weekly: also runs the Argo CD end-to-end test
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: Fetch the Kubernetes schema (used by schema tests and examples)
+        run: schemas/fetch.sh 1.31
+      - run: cargo fmt --check
+      - run: cargo clippy --all-targets --locked -- -D warnings
+      - run: cargo test --locked
+      - name: Check examples
+        run: |
+          cargo run -q -- check examples/webapp.cleat
+          cargo run -q -- check examples/overlays/prod.cleat
+          cargo run -q -- export examples/overlays/prod.cleat --set image=ghcr.io/acme/api:1 --target argocd > /dev/null
+
+  vscode-extension:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: node --check editors/vscode/extension.js
+      - run: editors/vscode/package.sh
+      - uses: actions/upload-artifact@v4
+        with:
+          name: cleat-vsix
+          path: editors/vscode/cleat.vsix
+
+  argocd-sidecar-image:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: docker build -f deploy/argocd/Dockerfile -t cleat-cmp:ci .
+      - name: Smoke test
+        run: |
+          docker run --rm cleat-cmp:ci id -u | grep -qx 999
+          docker run --rm cleat-cmp:ci test -f /home/argocd/cmp-server/config/plugin.yaml
+          docker run --rm cleat-cmp:ci cleat 2>&1 | grep -q "cleat argocd generate"
+
+  argocd-e2e:
+    # Slow (creates a kind cluster and installs Argo CD): weekly and on demand.
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - run: deploy/argocd/e2e/run.sh
