@@ -74,10 +74,13 @@ pub fn view_data(comps: &[Component], target: &str) -> Result<(Value, Value), St
             ("after", Value::List(c.after.iter().map(|a| s(a)).collect())),
             ("wave", Value::Int(wave)),
         ]));
-        for doc in docs.by_ref().take(c.docs.len()) {
+        for (i, doc) in docs.by_ref().take(c.docs.len()).enumerate() {
+            let at = c.spans.get(i).copied().unwrap_or_default();
             resources.push(obj(vec![
                 ("component", s(name)),
                 ("wave", Value::Int(wave)),
+                ("line", Value::Int(at.line as i64)),
+                ("col", Value::Int(at.col as i64)),
                 ("yaml", s(&emit::to_yaml(&doc))),
                 ("doc", doc),
             ]));

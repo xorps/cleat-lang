@@ -1,7 +1,7 @@
 {
   "name": "cleat",
   "displayName": "Cleat",
-  "description": "Cleat language support: diagnostics, hover, syntax highlighting, and live output preview.",
+  "description": "Cleat language support: diagnostics, hover, completion, a live output preview and a resource map.",
   "publisher": "cleat-lang",
   "version": "0.1.0",
   "license": "Apache-2.0",
@@ -35,6 +35,12 @@
         "icon": "$(open-preview)"
       },
       {
+        "command": "cleat.showResources",
+        "title": "Show Resource Map",
+        "category": "Cleat",
+        "icon": "$(type-hierarchy)"
+      },
+      {
         "command": "cleat.restartServer",
         "title": "Restart Language Server",
         "category": "Cleat"
@@ -44,6 +50,11 @@
       "editor/title": [
         {
           "command": "cleat.showOutput",
+          "when": "editorLangId == cleat",
+          "group": "navigation"
+        },
+        {
+          "command": "cleat.showResources",
           "when": "editorLangId == cleat",
           "group": "navigation"
         }
@@ -56,6 +67,11 @@
           "type": "string",
           "default": "",
           "description": "Path to the `cleat` binary. Empty: use target/debug/cleat or target/release/cleat in the workspace, else `cleat` on PATH."
+        },
+        "cleat.compareWith": {
+          "type": "string",
+          "default": "",
+          "description": "A git revision (branch, tag or commit) to compare with in the resource map, e.g. \"main\": new, changed and removed resources are marked. Empty: no comparison."
         },
         "cleat.exportArgs": {
           "type": "array",

@@ -139,7 +139,9 @@ editors/vscode/package.sh && code --install-extension editors/vscode/cleat.vsix
 ```
 
 Then open a `.cleat` file. **Cleat: Show Output** (the preview icon in the
-editor title bar) shows the exported YAML beside it, updating as you type.
+editor title bar) shows the exported YAML beside it, updating as you type,
+and **Cleat: Show Resource Map** shows the `cleat view` dashboard there;
+selecting a resource jumps to where it's defined.
 
 ## A tour
 

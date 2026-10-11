@@ -20,6 +20,11 @@ Open a `.cleat` file and you get:
   into imported modules and generated schema types.
 - **A live preview** of the exported YAML: run **Cleat: Show Output** (the
   preview icon in the editor title bar), and it updates as you type.
+- **A resource map**: **Cleat: Show Resource Map** (the hierarchy icon in
+  the editor title bar) opens the [`cleat view`](../reference/cli.md)
+  dashboard beside the file: the map, tables, checks between resources and
+  each resource's details, updating as you type. Selecting a resource jumps
+  to where it's defined, such as the `let` that builds it.
 
 ### Inputs while editing
 
@@ -39,6 +44,7 @@ so errors that only show up with real inputs (a runtime refinement check, an
 | Setting | Meaning |
 |---|---|
 | `cleat.serverPath` | The `cleat` binary. Default: `target/debug/cleat` or `target/release/cleat` in the workspace, else `cleat` on `PATH`. |
+| `cleat.compareWith` | A git revision (e.g. `main`) to compare with in the resource map: new, changed and removed resources are marked, as with `cleat view --diff`. |
 | `cleat.exportArgs` | Extra `cleat export` arguments for the preview, e.g. `["--set", "env=dev", "--target", "argocd"]`. |
 
 ## Other editors

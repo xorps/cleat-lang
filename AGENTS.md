@@ -79,7 +79,7 @@ Paths below are in `crates/cleat-core/src/` unless they say otherwise.
 | `crates/cleat-wasm/src/lib.rs` | The playground's WebAssembly interface: one JSON-in, JSON-out call over a `MemHost` |
 | `site/playground/` | The playground page: editor, highlighting, hover, completion, inputs, share links. Its Resources tab embeds the `cleat view` page (`?embed=1`, state sent by `postMessage`), which `site/build.sh` copies from `crates/cleat/src/view/` |
 | `site/docs/` | The documentation (mdBook); `reference/spec.md` includes `SPEC.md` |
-| `editors/vscode/` | Extension: TextMate grammar, a small LSP client, live preview |
+| `editors/vscode/` | Extension: TextMate grammar, a small LSP client, live preview, and the resource map (a webview of `cleat view --page`, fed by `cleat view --state`, under a nonce-based CSP) |
 | `deploy/argocd/` | Plugin config, distroless sidecar Dockerfile, repo-server patch, e2e test |
 
 ## Design rules to preserve

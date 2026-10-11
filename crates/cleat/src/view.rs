@@ -28,6 +28,8 @@ pub struct ViewConfig {
     pub target: String,
     /// With `--diff <rev>`: the program at that revision, to mark what changed.
     pub diff: Option<Base>,
+    /// The entry file's text, when it isn't read from disk (an editor's unsaved buffer).
+    pub source: Option<String>,
 }
 
 /// The page's data: problems, inputs, components and resources, as JSON.
@@ -35,7 +37,11 @@ pub struct ViewConfig {
 pub fn state(cfg: &ViewConfig, ui_inputs: Option<Vec<(String, String)>>) -> Value {
     let name = cfg.file.display().to_string();
     let mut out = vec![("file", s(&name)), ("target", s(&cfg.target))];
-    let src = match std::fs::read_to_string(&cfg.file) {
+    let read = match &cfg.source {
+        Some(src) => Ok(src.clone()),
+        None => std::fs::read_to_string(&cfg.file),
+    };
+    let src = match read {
         Ok(src) => src,
         Err(e) => {
             let msg = obj(vec![("msg", s(&format!("cannot read {name}: {e}")))]);
@@ -119,6 +125,20 @@ pub fn snapshot(cfg: &ViewConfig) -> String {
         .replace(
             r#"<script src="view.js"></script>"#,
             &format!("<script>window.CLEAT_SNAPSHOT = {data};</script>\n<script>\n{JS}</script>"),
+        )
+}
+
+/// The page with its stylesheet and script inlined and no data, for a host
+/// that sends the state itself (an editor webview; see `?embed=1` in view.js).
+pub fn page() -> String {
+    INDEX
+        .replace(
+            r#"<link rel="stylesheet" href="view.css">"#,
+            &format!("<style>\n{CSS}</style>"),
+        )
+        .replace(
+            r#"<script src="view.js"></script>"#,
+            &format!("<script>\n{JS}</script>"),
         )
 }
 

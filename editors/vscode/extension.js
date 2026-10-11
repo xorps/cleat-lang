@@ -1,9 +1,11 @@
 // Cleat for VS Code. Dependency-free: a minimal LSP client for `cleat lsp`
-// (diagnostics + hover) and a live preview of `cleat export` output.
+// (diagnostics, hover, completion, definitions), a live preview of `cleat
+// export` output, and the `cleat view` resource map in a webview.
 "use strict";
 
 const vscode = require("vscode");
 const cp = require("child_process");
+const crypto = require("crypto");
 const fs = require("fs");
 const path = require("path");
 
@@ -137,6 +139,24 @@ function didOpen(doc) {
   });
 }
 
+/** `app.inputs.json` (or .yaml) next to `app.cleat`, whether or not it exists. */
+function inputsFile(file) {
+  const stem = file.replace(/\.cleat$/, "");
+  return [".inputs.json", ".inputs.yaml", ".inputs.yml"].map((e) => stem + e).find((p) => fs.existsSync(p)) || stem + ".inputs.json";
+}
+
+/** The inputs file, if there is one, and the cleat.exportArgs setting. */
+function inputArgs(file) {
+  const inputs = inputsFile(file);
+  return [...(fs.existsSync(inputs) ? ["--input", inputs] : []), ...vscode.workspace.getConfiguration("cleat").get("exportArgs")];
+}
+
+/** The editor buffer if the file is open (unsaved edits included), else the file. */
+function sourceText(uri) {
+  const buffer = vscode.workspace.textDocuments.find((d) => d.uri.toString() === uri.toString());
+  return buffer ? buffer.getText() : fs.readFileSync(uri.fsPath, "utf8");
+}
+
 // ---------- output preview ----------
 
 const PREVIEW_SCHEME = "cleat-output";
@@ -174,12 +194,8 @@ class OutputProvider {
     this.open.add(source.toString());
     const file = source.fsPath;
     // The unsaved buffer goes through stdin; the file name still places imports.
-    const buffer = vscode.workspace.textDocuments.find((d) => d.uri.toString() === source.toString());
-    const args = ["export", file, "--stdin"];
-    const stem = file.replace(/\.cleat$/, "");
-    const inputs = [".inputs.json", ".inputs.yaml", ".inputs.yml"].map((e) => stem + e).find((p) => fs.existsSync(p)) || stem + ".inputs.json";
-    if (fs.existsSync(inputs)) args.push("--input", inputs);
-    args.push(...vscode.workspace.getConfiguration("cleat").get("exportArgs"));
+    const args = ["export", file, "--stdin", ...inputArgs(file)];
+    const inputs = inputsFile(file);
     return new Promise((resolve) => {
       const child = cp.execFile(serverPath(), args, { cwd: path.dirname(file) }, (err, stdout, stderr) => {
         const header = `# cleat ${args.map((a) => (a === file ? path.basename(a) : a)).join(" ")}\n`;
@@ -193,8 +209,106 @@ class OutputProvider {
           resolve(header + stdout);
         }
       });
-      child.stdin.end(buffer ? buffer.getText() : fs.readFileSync(file, "utf8"));
+      child.stdin.end(sourceText(source));
     });
+  }
+}
+
+// ---------- resource map ----------
+// The `cleat view` page in a webview beside the file. The extension runs
+// `cleat view --state` on the buffer and posts the result; selecting a
+// resource in the page reveals where it's defined.
+
+/** The page with a content security policy that only runs its own scripts (tagged with `nonce`). */
+function withCsp(page, nonce) {
+  const csp = `default-src 'none'; style-src 'unsafe-inline'; script-src 'nonce-${nonce}'; img-src data:;`;
+  return page
+    .replace("<head>", `<head>\n  <meta http-equiv="Content-Security-Policy" content="${csp}">`)
+    .replaceAll("<script>", `<script nonce="${nonce}">`);
+}
+
+class ResourceMaps {
+  constructor() {
+    this.panels = new Map(); // source URI -> webview panel
+    this.timers = new Map();
+    this.page = null;
+  }
+
+  async show(doc) {
+    const key = doc.uri.toString();
+    const existing = this.panels.get(key);
+    if (existing) {
+      existing.reveal(vscode.ViewColumn.Beside, true);
+      return;
+    }
+    const panel = vscode.window.createWebviewPanel(
+      "cleat.resources",
+      `Resources: ${path.basename(doc.uri.fsPath)}`,
+      { viewColumn: vscode.ViewColumn.Beside, preserveFocus: true },
+      { enableScripts: true, retainContextWhenHidden: true, localResourceRoots: [] }
+    );
+    this.panels.set(key, panel);
+    panel.onDidDispose(() => this.panels.delete(key));
+    panel.webview.onDidReceiveMessage((m) => this.onMessage(doc.uri, m));
+    try {
+      panel.webview.html = await this.html();
+    } catch (e) {
+      panel.webview.html = `<!doctype html><body><p>Cleat: could not load the resource view (${String(e.message || e).replace(/[<&]/g, "")}). Is <code>cleat</code> up to date?</p></body>`;
+    }
+  }
+
+  /** The page from `cleat view --page`, with a content security policy that only allows its own inline code. */
+  async html() {
+    if (!this.page) {
+      this.page = await new Promise((resolve, reject) =>
+        cp.execFile(serverPath(), ["view", "--page"], { maxBuffer: 16 << 20 }, (err, stdout) => (err ? reject(err) : resolve(stdout)))
+      );
+    }
+    return withCsp(this.page, crypto.randomBytes(18).toString("base64"));
+  }
+
+  schedule(uri) {
+    const key = uri.toString();
+    if (!this.panels.has(key)) return;
+    clearTimeout(this.timers.get(key));
+    this.timers.set(key, setTimeout(() => this.refresh(uri), 300));
+  }
+
+  scheduleAll() {
+    for (const key of this.panels.keys()) this.schedule(vscode.Uri.parse(key));
+  }
+
+  refresh(uri) {
+    const panel = this.panels.get(uri.toString());
+    if (!panel) return;
+    const file = uri.fsPath;
+    const compareWith = vscode.workspace.getConfiguration("cleat").get("compareWith");
+    const args = ["view", file, "--stdin", "--state", ...inputArgs(file), ...(compareWith ? ["--diff", compareWith] : [])];
+    const child = cp.execFile(serverPath(), args, { cwd: path.dirname(file), maxBuffer: 256 << 20 }, (err, stdout, stderr) => {
+      let state;
+      try {
+        state = JSON.parse(stdout);
+      } catch {
+        state = { file, errors: [{ msg: (stderr || (err && err.message) || "cleat view --state failed").trim() }] };
+      }
+      panel.webview.postMessage({ type: "cleat-state", state });
+    });
+    child.stdin.end(sourceText(uri));
+  }
+
+  async onMessage(uri, m) {
+    if (m.type === "cleat-view-ready") return this.refresh(uri);
+    if (m.type === "reveal" && Number.isInteger(m.line) && m.line > 0) {
+      const doc = await vscode.workspace.openTextDocument(uri);
+      const visible = vscode.window.visibleTextEditors.find((e) => e.document.uri.toString() === uri.toString());
+      const editor = await vscode.window.showTextDocument(doc, { viewColumn: visible ? visible.viewColumn : vscode.ViewColumn.One, preserveFocus: true });
+      // Spans are 1-based line/column in characters; VS Code positions are 0-based UTF-16.
+      const lineText = doc.lineAt(Math.min(m.line - 1, doc.lineCount - 1)).text;
+      const col = [...lineText].slice(0, Math.max(0, (m.col || 1) - 1)).join("").length;
+      const pos = new vscode.Position(m.line - 1, col);
+      editor.selection = new vscode.Selection(pos, pos);
+      editor.revealRange(new vscode.Range(pos, pos), vscode.TextEditorRevealType.InCenterIfOutsideViewport);
+    }
   }
 }
 
@@ -204,13 +318,19 @@ async function activate(context) {
   log = vscode.window.createOutputChannel("Cleat");
   const diagnostics = vscode.languages.createDiagnosticCollection("cleat");
   const output = new OutputProvider();
+  const maps = new ResourceMaps();
   context.subscriptions.push(log, diagnostics);
 
   context.subscriptions.push(
     vscode.workspace.onDidOpenTextDocument((doc) => isCleat(doc) && didOpen(doc)),
     vscode.workspace.onDidChangeTextDocument((e) => {
-      if (/\.inputs\.(json|ya?ml)$/.test(e.document.uri.fsPath)) output.refreshAll();
+      if (/\.inputs\.(json|ya?ml)$/.test(e.document.uri.fsPath)) {
+        output.refreshAll();
+        maps.scheduleAll();
+      }
       if (!isCleat(e.document)) return;
+      // Any open map may import this file.
+      maps.scheduleAll();
       output.schedule(e.document.uri);
       // Other previews may import this file.
       for (const key of output.open) if (key !== e.document.uri.toString()) output.schedule(vscode.Uri.parse(key));
@@ -292,6 +412,17 @@ async function activate(context) {
       await vscode.languages.setTextDocumentLanguage(doc, "yaml");
       await vscode.window.showTextDocument(doc, { viewColumn: vscode.ViewColumn.Beside, preview: true, preserveFocus: true });
     }),
+    vscode.commands.registerCommand("cleat.showResources", async () => {
+      const editor = vscode.window.activeTextEditor;
+      if (!editor || !isCleat(editor.document)) {
+        vscode.window.showInformationMessage("Open a .cleat file first.");
+        return;
+      }
+      await maps.show(editor.document);
+    }),
+    vscode.workspace.onDidChangeConfiguration((e) => {
+      if (e.affectsConfiguration("cleat")) maps.scheduleAll();
+    }),
     vscode.commands.registerCommand("cleat.restartServer", async () => {
       await client?.stop();
       diagnostics.clear();
@@ -307,4 +438,4 @@ async function deactivate() {
   await client?.stop();
 }
 
-module.exports = { activate, deactivate };
+module.exports = { activate, deactivate, withCsp };

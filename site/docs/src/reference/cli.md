@@ -98,6 +98,11 @@ changes. Inputs start from `--set` and `--input` and can be edited on the
 page. The server listens on 127.0.0.1 only. With `--out view.html` it writes
 a self-contained snapshot instead, to attach to a pull request or a ticket.
 
+Two options exist for editor integrations: `--state` prints the page's data
+once as JSON (with `--stdin` for unsaved text), and `cleat view --page`
+prints the page itself, which they show and send that data to. Each
+resource's data includes the line and column it's defined at.
+
 ## `cleat diff`
 
 Compares the output with the same program at a git revision (a branch, tag
