@@ -1,0 +1,20 @@
+// The README's first example.
+//   cleat export examples/quickstart.cleat --set env=prod --set image=ghcr.io/acme/api:1.4.2
+
+import * as k8s from "../schemas/kubernetes-1.37.json"
+
+input env: "dev" | "prod"
+input image: Str
+input replicas: Int where self >= 1 = 2
+
+export k8s.Deployment {
+  metadata.name: "api",
+  spec: {
+    replicas: if env == "prod" then max(replicas, 3) else replicas,
+    selector.matchLabels.app: "api",
+    template: {
+      metadata.labels.app: "api",
+      spec.containers: [{ name: "api", image, ports: [{ containerPort: 8080 }] }],
+    },
+  },
+}

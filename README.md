@@ -5,57 +5,153 @@
   </picture>
 </p>
 
+<p align="center">
+  <strong>Typed configuration for Kubernetes.</strong><br>
+  Real types from the Kubernetes API and your CRDs, errors at the exact field that's wrong,<br>
+  and plain YAML out: for Argo CD, Flux, or <code>kubectl apply</code>.
+</p>
+
+<p align="center">
+  <a href="https://github.com/xorps/test-lang/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/xorps/test-lang/actions/workflows/ci.yml/badge.svg"></a>
+  <img alt="Rust 1.99" src="https://img.shields.io/badge/rust-1.99-orange">
+  <img alt="Status: experimental" src="https://img.shields.io/badge/status-experimental-yellow">
+</p>
+
 > [!WARNING]
 > **Cleat is under active development.** The language, the CLI and the
 > editor and Argo CD integrations can change in incompatible ways between
 > commits, and it hasn't been used in production yet.
 
-A typed configuration language whose values are exactly JSON, aimed at
-replacing Helm and Kustomize for Kubernetes. It has structural,
-TypeScript-style types (literal unions, optional fields, defaults,
-refinements), typed inputs, and errors that name the exact field and
-constraint that failed. See [SPEC.md](SPEC.md).
-
-```sh
-cargo build
-./target/debug/cleat check examples/webapp.cleat
-./target/debug/cleat export examples/webapp.cleat --set env=prod --set image=ghcr.io/acme/api:1.4.2
-./target/debug/cleat export examples/webapp.cleat --set env=prod --set image=api:1 --target argocd
-./target/debug/cleat export examples/webapp.cleat --set env=prod --set image=api:1 \
-    --target flux --out deploy --flux-source infra --flux-path deploy
-cargo test
-```
-
-## Kubernetes and CRD types
-
-Import the Kubernetes OpenAPI spec and your CRDs; `apiVersion` and `kind`
-fill themselves in, descriptions show on hover, and enum fields the spec
-leaves as plain strings (`Service.spec.type`, `imagePullPolicy`,
-`restartPolicy`, protocols, access modes, ...) are checked against their
-allowed values:
+## A taste
 
 ```ts
 import * as k8s from "../schemas/kubernetes-1.37.json"
-import * as cm from "./crds/cert-manager.crds.yaml"
 
-export k8s.Deployment { metadata.name: "web", spec: { replicas: 2, ... } }
+input env: "dev" | "prod"
+input image: Str
+input replicas: Int where self >= 1 = 2
+
+export k8s.Deployment {
+  metadata.name: "api",
+  spec: {
+    replicas: if env == "prod" then max(replicas, 3) else replicas,
+    selector.matchLabels.app: "api",
+    template: {
+      metadata.labels.app: "api",
+      spec.containers: [{ name: "api", image, ports: [{ containerPort: 8080 }] }],
+    },
+  },
+}
+```
+
+```console
+$ cleat export examples/quickstart.cleat --set env=prod --set image=ghcr.io/acme/api:1.4.2
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: api
+spec:
+  replicas: 3
+  ...
+```
+
+`apiVersion` and `kind` fill themselves in. Now misspell `replicas` and add
+`imagePullPolicy: "Allways"` to the container, and the mistakes are caught
+before anything reaches a cluster, with the exact location and a fix:
+
+```console
+$ cleat check examples/quickstart.cleat
+quickstart.cleat:13:5: error: unknown field `replcias` in `k8s.apps.v1.DeploymentSpec`; did you mean `replicas`?
+quickstart.cleat:17:64: error: type mismatch: expected `"Always" | "IfNotPresent" | "Never"`, found `"Allways"`
+```
+
+Bad inputs are rejected before evaluation, all of them at once:
+
+```console
+$ cleat export examples/quickstart.cleat --set env=production --set image=api:1 --set replicas=0
+quickstart.cleat:6:1: error: input `env`: expected `"dev" | "prod"`, got "production" (string)
+quickstart.cleat:8:1: error: input `replicas`: 0 does not satisfy `self >= 1`
+```
+
+## Why Cleat
+
+- **Types from the real API.** Import the Kubernetes OpenAPI spec and your CRD
+  files; every resource, field, required field and enum is checked. Field
+  docs come along, so they show on hover.
+- **Typed inputs instead of `values.yaml`.** Inputs declare their types,
+  defaults and constraints. Bad values are rejected up front, all of them
+  at once, with the allowed values in the message.
+- **Overlays that can't silently miss.** `base with { [kind: "Deployment"].spec.replicas: 3 }`
+  is checked against the types. A misspelled field or a selector that
+  matches nothing is an error, not a no-op.
+- **Dependencies between components.** `export app after db = ...` becomes
+  Argo CD sync waves or Flux `dependsOn`.
+- **Small and familiar.** TypeScript-style structural types, ES-style
+  imports, functions, comprehensions and refinements, and nothing that
+  makes evaluation hard to follow: no recursion, no I/O, and imports can't
+  leave the repository.
+- **Made for editors.** Completion of Kubernetes fields with their docs,
+  hover, go-to-definition, errors as you type, and a live YAML preview.
+
+## Compared with
+
+| | Helm | Kustomize | Cleat |
+|---|---|---|---|
+| How you write config | Go templates over YAML text | YAML plus patches | A typed language that outputs YAML |
+| Checks against the Kubernetes API | After rendering (cluster or a separate linter) | After rendering (cluster or a separate linter) | While writing, with the field and a fix |
+| Inputs | `values.yaml` (optional JSON Schema) | none | Typed `input`s with defaults and constraints |
+| Variations per environment | values files | overlays (strategic merge) | modules and typed `with` patches |
+| Ordering between resources | hooks and weights | by kind only | `after` → sync waves / `dependsOn` |
+| Editor support | limited | limited | Completion, hover, definitions, live preview |
+
+## Getting started
+
+Cleat is built from source for now (Rust is installed by `rustup` from
+`rust-toolchain.toml`):
+
+```sh
+git clone https://github.com/xorps/test-lang && cd test-lang
+cargo install --path .                 # installs the `cleat` binary
+schemas/fetch.sh 1.37                  # Kubernetes OpenAPI spec, checksum-verified
+
+cleat check examples/quickstart.cleat
+cleat export examples/quickstart.cleat --set env=prod --set image=ghcr.io/acme/api:1.4.2
+```
+
+For VS Code, build and install the extension (no npm needed):
+
+```sh
+editors/vscode/package.sh && code --install-extension editors/vscode/cleat.vsix
+```
+
+Then open a `.cleat` file. **Cleat: Show Output** (the preview icon in the
+editor title bar) shows the exported YAML beside it, updating as you type.
+
+## A tour
+
+### Kubernetes and CRD types
+
+```ts
+import * as k8s from "../schemas/kubernetes-1.37.json"     // the Kubernetes OpenAPI spec
+import * as cm from "./crds/cert-manager.crds.yaml"         // any CRD files
+import { Deployment, Service } from "../schemas/kubernetes-1.37.json"
+
 export cm.Certificate { metadata.name: "web-tls", spec: { secretName: "web-tls", ... } }
 ```
 
-Download the schema the example uses (or another version) with:
+Required fields, enums (including the ~40 the Kubernetes spec leaves as
+plain strings, like `Service.spec.type` and `imagePullPolicy`), int-or-string
+fields and schema patterns are all checked. `cleat gen <schema>` prints the
+generated types. You can also narrow types for your own policies:
 
-```sh
-schemas/fetch.sh 1.37
+```ts
+refine k8s.ServiceSpec with { type: "ClusterIP" | "LoadBalancer" }   // no NodePorts here
 ```
 
-`cleat gen <schema>` prints the generated Cleat types. Imports follow
-ECMAScript: `import * as ns`, `import { A, B }`, and data files with
-`import conf from "./nginx.conf" with { type: "text" }` (or `"json"`/`"yaml"`).
-
-## Shared bases and environment overlays
+### Shared bases and environment overlays
 
 A module holds the shared pieces; each environment imports it and patches
-the result with `with` (the role of Kustomize overlays):
+the result:
 
 ```ts
 // examples/overlays/prod.cleat
@@ -69,122 +165,57 @@ export api = base.app("api", image) with {
 }
 ```
 
-Patches are checked against the Kubernetes types: a misspelled field, a
-value of the wrong type, or a selector that can't match is an error.
+### Components and dependencies
 
-## Argo CD
-
-Cleat runs as an Argo CD [config management plugin](https://argo-cd.readthedocs.io/en/stable/operator-manual/config-management-plugins/) sidecar:
-
-```sh
-docker build -f deploy/argocd/Dockerfile -t <registry>/cleat-cmp:<tag> .   # then push it
-# set the image in deploy/argocd/repo-server-patch.yaml, then:
-kubectl -n argocd patch deployment argocd-repo-server --patch-file deploy/argocd/repo-server-patch.yaml
+```ts
+export db = [postgres, postgres_service]
+export config = [app_config]
+export app after db, config = [api, api_service]
 ```
 
+`cleat export --target argocd` adds `argocd.argoproj.io/sync-wave`
+annotations. `--target flux --out dir` writes one directory per component
+plus Flux `Kustomization`s with `dependsOn` and `wait: true`. Cycles and
+unknown names are compile errors.
+
+### Data files, text and multi-line strings
+
+```ts
+import defaults from "./defaults.yaml" with { type: "yaml" }    // typed from its contents
+import nginxConf from "./nginx.conf" with { type: "text" }
+
+let conf = """
+    server { listen \(defaults.port); }
+    """
+```
+
+### Argo CD
+
+Cleat runs as an Argo CD
+[config management plugin](https://argo-cd.readthedocs.io/en/stable/operator-manual/config-management-plugins/)
+sidecar: a 6 MB distroless image with a static binary
+(`deploy/argocd/`).
+
 ```yaml
-# Application
 spec:
   source:
     repoURL: https://github.com/acme/deploy.git
     path: apps/shop
     plugin:
       name: cleat-v1
-      env:                                  # optional
-        - { name: CLEAT_FILE, value: prod.cleat }   # default: main.cleat
       parameters:
         - { name: image, string: ghcr.io/acme/api:1.4.2 }
 ```
 
-- Each `input` is announced to the Argo CD UI as a parameter: required if it
-  has no default, with its type (e.g. `Env = "dev" | "prod"`) as the tooltip.
-- Parameters are decoded by type and validated before evaluation; invalid
-  ones show up in the Application's conditions with Cleat's message.
-- Output uses the `argocd` target, so `export x after y` becomes sync waves
-  (`CLEAT_TARGET=plain` turns this off).
-- Imports can't read outside the repository checkout (`..` and symlinks
-  included), so a repository can't use the plugin to read the sidecar's files.
+Each `input` appears in the Argo CD UI as a parameter, with its type as the
+tooltip. Invalid parameters show up in the Application's status with Cleat's
+message, and `after` dependencies become sync waves.
+`deploy/argocd/e2e/run.sh` tests all of this against a real Argo CD in a
+throwaway kind cluster.
 
-`deploy/argocd/e2e/run.sh` runs all of this against a throwaway kind cluster
-(Argo CD stable, an in-cluster git server, three dependent components) and
-checks parameters, patches, sync waves and their order, and error reporting.
+## Learn more
 
-## Editor support
-
-`cleat lsp` is a Language Server (stdio) that works with any LSP client:
-
-- diagnostics as you type;
-- completion of object keys (from the expected type, including Kubernetes and
-  CRD types, with their docs; keys already set are left out, required ones
-  come first), field names after `.`, members of imported modules, `with`
-  patch paths, and values (enum literals, variables and functions that fit);
-- completion of type names (including `k8s.` namespaces), type-level `with`
-  paths, and `match` arms (literals, and `{ kind: "Service", .. }` shapes for
-  discriminated unions);
-- hover for types, fields, functions and bindings, with OpenAPI descriptions;
-- go to definition for variables (including parameters, loop and pattern
-  variables), functions, types (Kubernetes and CRD types open the generated
-  type source), imported module members and import paths;
-- unsaved edits to imported files are seen immediately, and every open file
-  is re-checked when something it imports changes;
-- with a `<file>.inputs.json` (or `.yaml`) next to the file, errors that only
-  show up for those inputs are reported inline too.
-
-For VS Code (no npm needed):
-
-```sh
-cargo build
-editors/vscode/package.sh
-code --install-extension editors/vscode/cleat.vsix --force
-```
-
-The extension uses the newest of `target/debug/cleat` and
-`target/release/cleat` in the open workspace, or `cleat.serverPath`.
-**Cleat: Show Output** (the preview icon in the editor title bar) opens the
-exported YAML beside the file and updates as you type.
-Inputs come from `<file>.inputs.json` next to the file and the
-`cleat.exportArgs` setting.
-
-## What fails, and when
-
-| Mistake | Caught by | Message |
-|---|---|---|
-| `metdata:` typo | `cleat check` | ``unknown field `metdata` in `Svc`; did you mean `metadata`?`` |
-| `port: 70000` literal | `cleat check` | ``refinement violated: `1 <= 70000 && 70000 <= 65535` is false (required by `Port`)`` |
-| optional field used without a check | `cleat check` | `` `m.labels` may be null; use `?.` or `??` `` |
-| `--set env=production` | `cleat export` | ``input `env`: expected `Env` (`"dev" \| "staging" \| "prod"`), got "production"`` |
-| computed port out of range | `cleat export` | ``argument `port` of `container`: 70080 does not satisfy …``, followed by the call stack |
-| component dependency cycle | `cleat check` | `dependency cycle between components: a -> b -> a` |
-
-## CI and releases
-
-The Rust version (currently 1.99.0) is pinned in `rust-toolchain.toml`, which
-`rustup` picks up locally, in CI and in the release and Docker builds.
-
-`.github/workflows/ci.yml` runs on every push: `cargo fmt --check`, clippy
-with warnings as errors, the tests (Linux and macOS, with the Kubernetes
-schema fetched), the examples, the VS Code extension package, and a smoke
-test of the Argo CD sidecar image. The Argo CD end-to-end test runs weekly
-and on demand.
-
-Pushing a tag like `v0.1.0` runs `release.yml`: binaries for Linux and macOS
-(x86_64 and arm64), the `.vsix`, and a multi-arch sidecar image at
-`ghcr.io/<owner>/cleat-cmp:<tag>`, attached to a GitHub release.
-
-## Layout
-
-| Module | Role |
-|---|---|
-| `src/lexer.rs`, `src/parser.rs` | Source to AST (dotted keys, comprehensions, interpolation) |
-| `src/types.rs` | Types, normalization, subtyping, narrowing |
-| `src/check.rs` | Static checker: bidirectional, field-aware diagnostics, VCs |
-| `src/vc.rs` | Refinement obligations: proved, refuted, or left to runtime |
-| `src/eval.rs` | Evaluator, input decoding, runtime type checks with defaults |
-| `src/emit.rs`, `src/json.rs` | YAML/JSON output with safe quoting; JSON input parsing |
-| `src/openapi.rs`, `src/modules.rs` | Schema-to-type generation; import loading and caching |
-| `src/targets.rs` | `plain`, `argocd` (sync waves), `flux` (`dependsOn`) |
-| `src/lsp.rs` | Language server: diagnostics and hover |
-| `editors/vscode/` | VS Code extension: highlighting, LSP client, output preview |
-
-Next up: Kubernetes OpenAPI import, so `Deployment`, `Service` and CRDs come
-with real types instead of hand-written ones.
+- [SPEC.md](SPEC.md): the language specification
+- [examples/](examples/): the quickstart above, a web app, and a shared base with a production overlay
+- [deploy/argocd/](deploy/argocd/): the Argo CD plugin, sidecar image and end-to-end test
+- [AGENTS.md](AGENTS.md): how the code is organized, and how to build, test and contribute
