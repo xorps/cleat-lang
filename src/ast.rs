@@ -521,6 +521,16 @@ pub enum TypeKind {
     With(Box<TypeExpr>, Vec<Patch>),
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub enum ImportForm {
+    /// `import * as ns from "..."`: everything as `ns.x`.
+    Namespace(String),
+    /// `import { a, b.c as d } from "..."`: (exported name, local name, span).
+    Named(Vec<(String, String, Span)>),
+    /// `import x from "..." with { type: "..." }`: the file's contents as a value.
+    Default(String),
+}
+
 /// One entry of `T with { ... }`.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Patch {
@@ -610,8 +620,9 @@ pub enum Item {
     /// `export e` or `export name (after a, b)? = e`. Named exports are
     /// components; `after` orders them (Argo sync waves, Flux `dependsOn`).
     Export { name: Option<String>, after: Vec<(String, Span)>, value: Expr, span: Span },
-    /// `import name from "path"`: the module's types become `name.T`.
-    Import { name: String, path: String, span: Span },
+    /// ES-style imports: `import * as ns`, `import { a, b as c }`, or
+    /// `import x ... with { type: "json" | "yaml" | "text" }`.
+    Import { form: ImportForm, path: String, attrs: Vec<(String, String, Span)>, span: Span },
     /// `refine T with { ... }`: narrow an existing (usually imported) type in place.
     Refine { name: String, patches: Vec<Patch>, span: Span },
 }

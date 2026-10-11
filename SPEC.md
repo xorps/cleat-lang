@@ -120,28 +120,35 @@ export { kind: "ConfigMap", ... }       // each `export` emits documents
 
 ### 4.1 Imports
 
-```ts
-import k8s from "../schemas/kubernetes-1.31.json"    // OpenAPI (Swagger 2 or OpenAPI 3)
-import cm from "./crds/cert-manager.crds.yaml"         // CustomResourceDefinitions
-import lib from "./lib/base.cleat"                     // a Cleat module
+Imports follow ECMAScript: the form says what you get, and `with { type: ... }`
+says how to read a file as a value.
 
-let d = k8s.Deployment { ... }
-fn issuer() -> cm.ClusterIssuer = ...
-let docs = lib.app("api", image)                       // functions: `ns.f(...)`
-let team = lib.team                                    // constants: `ns.x`
+```ts
+import * as k8s from "../schemas/kubernetes-1.31.json"            // namespace: a schema's types
+import * as base from "./base.cleat"                               // namespace: a Cleat module
+import { Deployment, core.v1.Event as Event } from "../schemas/kubernetes-1.31.json"   // named
+import { app, part_of } from "./base.cleat"
+import defaults from "./defaults.yaml" with { type: "yaml" }        // default: data
+import settings from "./settings.json" with { type: "json" }
+import nginxConf from "./nginx.conf" with { type: "text" }          // Str
 ```
 
-An import brings a module in under a namespace. Paths are relative to the
-importing file.
+| Form | Gives |
+|---|---|
+| `import * as ns from "f"` | Everything in `f` as `ns.x`: types (`ns.T`), functions (`ns.f(...)`) and constants (`ns.c`). `f` is a schema (`.json`/`.yaml`, OpenAPI or CRDs) or a `.cleat` module. |
+| `import { a, b.c as d } from "f"` | The named types, functions and constants, unqualified. Qualified schema names (`core.v1.Event`) can be imported under a short local name. |
+| `import x from "f" with { type: "json" \| "yaml" \| "text" }` | The file's contents as a constant. `json`/`yaml` data is typed from its contents: objects become exact records, scalars are widened (`"a"` is `Str`), lists hold the union of their elements, and a YAML file with several documents is a list. `text` is a `Str`. |
+
+A default import without a `type` attribute is an error, as is a `type`
+attribute on a namespace or named import. `type` is the only supported
+attribute. Paths are relative to the importing file.
 
 A **Cleat module** may contain types, functions, `let`s, its own imports and
 `refine`s. It may not declare `input`s or `export`s: values come in as
 function parameters and leave as return values. A module is checked on its
 own; its errors are reported at the `import` line of the importer, with the
-module's file and position. Everything it defines appears as `ns.name`,
-including what it imported (`lib.k8s.Deployment`). A module's `refine`s
-apply to its own view of a schema (`lib.k8s.*`), not to the importer's.
-Import cycles are errors.
+module's file and position. A module's `refine`s apply to its own view of a
+schema, not to the importer's. Import cycles are errors.
 
 Schemas are converted to Cleat types (`cleat gen <file>` prints the result):
 
@@ -209,7 +216,7 @@ source order. Static checks and runtime checks both use the refined type.
 ## 5. Expressions
 
 ```ts
-null  true  42  1.5  "text \(expr) more"  [a, b]  (a, b)  { k: v }
+null  true  42  1.5  "text \(expr) more"  """multi-line"""  [a, b]  (a, b)  { k: v }
 x   x.f   x.0   xs[i]   m["key"]   f(a, b, name: c)   T { ... }
 -x  !x  a + b  a - b  a * b  a / b  a % b  a == b  a != b  a < b  ...
 a && b   a || b   a ?? b   if c then a else b   let x = e; body
@@ -218,6 +225,18 @@ match e { pattern => e, ... }
 
 - **Interpolation** is `\(expr)`, so shell `${VAR}` in container commands is
   left alone. Interpolated values must be `Str`, `Int`, `Float` or `Bool`.
+- **Multi-line strings** start on the line after `"""` and end at a `"""`
+  on its own line. The closing line's indentation is removed from every
+  line, and the newline before the closing quotes is not part of the string.
+  Escapes and interpolation work as in ordinary strings.
+
+  ```ts
+  let conf = """
+      server {
+        listen \(port);
+      }
+      """
+  ```
 - **`a ?? b`** gives `b` when `a` is `null`.
 - **`T { ... }`** checks the object against `T` and fills in its defaults. It
   is not a constructor: the result is an ordinary value.
@@ -270,7 +289,7 @@ match r {
 environments specialize a shared base (the role of Kustomize overlays):
 
 ```ts
-import base from "./base.cleat"
+import * as base from "./base.cleat"
 
 export base.app("api", image) with {
   [kind: "Deployment"].spec.replicas: 3,                                    // set

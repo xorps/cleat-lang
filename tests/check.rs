@@ -366,7 +366,7 @@ fn openapi_generation() {
 #[test]
 fn openapi_import_checks_and_exports() {
     let dir = fixture_dir("openapi", &[("api.json", SWAGGER)]);
-    let check = |body: &str| check_source_at(&format!("import t from \"api.json\"\n{body}"), Some(&dir));
+    let check = |body: &str| check_source_at(&format!("import * as t from \"api.json\"\n{body}"), Some(&dir));
     let errs = |body: &str| check(body).errors.into_iter().map(|e| e.msg).collect::<Vec<_>>().join("\n");
 
     assert_eq!(errs("let s = t.Site { spec: { host: \"a.b\", port: 80, mode: \"fast\" } }"), "");
@@ -377,7 +377,7 @@ fn openapi_import_checks_and_exports() {
     assert!(errs("let e = t.Event {}").contains("`t.Event` is ambiguous; use one of `t.core.v1.Event`, `t.other.v1.Event`"));
     assert!(errs("let s = t.Siet {}").contains("did you mean `t.Site`?"));
 
-    let src = "import t from \"api.json\"\ninput r: Int = 3\nexport t.Site { spec: { host: \"a\", replicas: r } }";
+    let src = "import * as t from \"api.json\"\ninput r: Int = 3\nexport t.Site { spec: { host: \"a\", replicas: r } }";
     let Ok((_, comps)) = export_at(src, Some(&dir), vec![]) else { panic!() };
     let out = emit::to_yaml_stream(&targets::plain(&comps));
     assert_eq!(out, "apiVersion: web.test.io/v1\nkind: Site\nspec:\n  host: a\n  replicas: 3\n");
@@ -390,7 +390,7 @@ fn openapi_import_checks_and_exports() {
 #[test]
 fn imported_docs_show_on_hover() {
     let dir = fixture_dir("hover", &[("api.json", SWAGGER)]);
-    let out = check_source_at("import t from \"api.json\"\nlet s = t.Site { spec: { host: \"a\" } }", Some(&dir));
+    let out = check_source_at("import * as t from \"api.json\"\nlet s = t.Site { spec: { host: \"a\" } }", Some(&dir));
     let h = out.hovers.iter().find(|h| h.text.contains("host: Str")).expect("hover on `host`");
     assert_eq!(h.doc.as_deref(), Some("The host name."));
 }
@@ -443,7 +443,7 @@ fn crd_import() {
     assert!(src.contains("type Widget = v1.Widget"), "storage version wins:\n{src}");
 
     let errs = |body: &str| {
-        check_source_at(&format!("import w from \"widgets.yaml\"\n{body}"), Some(&dir))
+        check_source_at(&format!("import * as w from \"widgets.yaml\"\n{body}"), Some(&dir))
             .errors
             .into_iter()
             .map(|e| e.msg)
@@ -456,7 +456,7 @@ fn crd_import() {
     assert!(errs("let a = w.Widget { spec: { size: 0 } }").contains("refinement violated"));
     assert!(errs("let a = w.v1alpha1.Widget { spec: { size: 0 } }").is_empty());
 
-    let Ok((_, comps)) = export_at("import w from \"widgets.yaml\"\nexport w.Widget { metadata.name: \"a\", spec.size: 1 }", Some(&dir), vec![]) else {
+    let Ok((_, comps)) = export_at("import * as w from \"widgets.yaml\"\nexport w.Widget { metadata.name: \"a\", spec.size: 1 }", Some(&dir), vec![]) else {
         panic!()
     };
     let out = emit::to_yaml_stream(&targets::plain(&comps));
@@ -465,7 +465,7 @@ fn crd_import() {
 
 #[test]
 fn import_errors() {
-    let out = check_source_at("import x from \"missing.json\"", Some(Path::new("/nonexistent")));
+    let out = check_source_at("import * as x from \"missing.json\"", Some(Path::new("/nonexistent")));
     assert!(out.errors[0].msg.contains("import `x`: cannot read"), "{:?}", out.errors);
 }
 
@@ -496,7 +496,7 @@ fn with_defaults_fill_in() {
 fn refine_applies_to_every_reference() {
     let dir = fixture_dir("refine", &[("api.json", SWAGGER)]);
     let errs = |body: &str| {
-        check_source_at(&format!("import t from \"api.json\"\n{body}"), Some(&dir))
+        check_source_at(&format!("import * as t from \"api.json\"\n{body}"), Some(&dir))
             .errors
             .into_iter()
             .map(|e| e.msg)
@@ -513,7 +513,7 @@ fn refine_applies_to_every_reference() {
     assert!(errs(&format!("{r2}let s = t.Site {{ spec: {{ host: \"a\", replicas: 1 }} }}")).contains("refinement violated"));
     assert!(errs("refine t.Nope with { a: Str }").contains("unknown type `t.Nope`"));
     // Runtime checks see the refinement too.
-    let src = "import t from \"api.json\"\nrefine t.SiteSpec with { replicas where self <= 5 }\ninput r: Int\nexport t.Site { spec: { host: \"a\", replicas: r } }";
+    let src = "import * as t from \"api.json\"\nrefine t.SiteSpec with { replicas where self <= 5 }\ninput r: Int\nexport t.Site { spec: { host: \"a\", replicas: r } }";
     let Err(ExportError::Eval(es)) = export_at(src, Some(&dir), vec![("r".into(), InputValue::Raw("7".into()))]) else { panic!() };
     assert!(es[0].msg.contains("7 does not satisfy `self <= 5`"), "{}", es[0].msg);
 }
@@ -599,7 +599,7 @@ fn module_dir(name: &str) -> PathBuf {
 #[test]
 fn modules_export_functions_constants_and_types() {
     let dir = module_dir("mod-ok");
-    let src = "import lib from \"lib.cleat\"\nlet t: Str = lib.team\nlet r: lib.Res = { kind: \"Service\", metadata.name: \"x\" }\nexport lib.app(\"api\", replicas: 2) with {\n  [kind: \"Deployment\"].metadata.labels +: { tier: \"prod\" },\n  [kind: \"Service\"].spec.type: \"LoadBalancer\",\n}";
+    let src = "import * as lib from \"lib.cleat\"\nlet t: Str = lib.team\nlet r: lib.Res = { kind: \"Service\", metadata.name: \"x\" }\nexport lib.app(\"api\", replicas: 2) with {\n  [kind: \"Deployment\"].metadata.labels +: { tier: \"prod\" },\n  [kind: \"Service\"].spec.type: \"LoadBalancer\",\n}";
     let Ok((_, comps)) = export_at(src, Some(&dir), vec![]) else { panic!("{:?}", check_source_at(src, Some(&dir)).errors) };
     let out = emit::to_yaml_stream(&targets::plain(&comps));
     assert_eq!(
@@ -612,7 +612,7 @@ fn modules_export_functions_constants_and_types() {
 fn module_errors_are_reported_at_the_importer() {
     let dir = module_dir("mod-err");
     let errs = |body: &str| {
-        check_source_at(&format!("import lib from \"lib.cleat\"\n{body}"), Some(&dir))
+        check_source_at(&format!("import * as lib from \"lib.cleat\"\n{body}"), Some(&dir))
             .errors
             .into_iter()
             .map(|e| e.msg)
@@ -632,12 +632,62 @@ fn module_errors_are_reported_at_the_importer() {
         &[
             ("broken.cleat", "fn f() -> Int = \"no\""),
             ("input.cleat", "input x: Int"),
-            ("a.cleat", "import b from \"b.cleat\"\nfn f() -> Int = 1"),
-            ("b.cleat", "import a from \"a.cleat\"\nfn g() -> Int = 1"),
+            ("a.cleat", "import * as b from \"b.cleat\"\nfn f() -> Int = 1"),
+            ("b.cleat", "import * as a from \"a.cleat\"\nfn g() -> Int = 1"),
         ],
     );
     let errs = |body: &str| check_source_at(body, Some(&dir)).errors.into_iter().map(|e| e.msg).collect::<Vec<_>>().join("\n");
-    assert!(errs("import m from \"broken.cleat\"").contains("broken.cleat:1:17: type mismatch"));
-    assert!(errs("import m from \"input.cleat\"").contains("a module cannot declare `input`s"));
-    assert!(errs("import m from \"a.cleat\"").contains("import cycle"));
+    assert!(errs("import * as m from \"broken.cleat\"").contains("broken.cleat:1:17: type mismatch"));
+    assert!(errs("import * as m from \"input.cleat\"").contains("a module cannot declare `input`s"));
+    assert!(errs("import * as m from \"a.cleat\"").contains("import cycle"));
+}
+
+// ---- ES-style imports and multi-line strings ----
+
+#[test]
+fn named_imports() {
+    let dir = fixture_dir("named", &[("api.json", SWAGGER), ("lib.cleat", LIB)]);
+    let errs = |body: &str| check_source_at(body, Some(&dir)).errors.into_iter().map(|e| e.msg).collect::<Vec<_>>().join("\n");
+    assert_eq!(errs("import { Site, web.v1.SiteSpec as Spec } from \"api.json\"\nlet s = Site { spec: { host: \"a\" } }\nlet t: Spec = { host: \"b\" }"), "");
+    assert_eq!(errs("import { app, team, Res } from \"lib.cleat\"\nlet r: [Res] = app(\"x\")\nlet t: Str = team"), "");
+    assert!(errs("import { Event } from \"api.json\"").contains("`Event` is ambiguous in `api.json`; import one of `core.v1.Event`, `other.v1.Event`"));
+    assert!(errs("import { Siet } from \"api.json\"").contains("has no export `Siet`; did you mean `Site`?"));
+    // Named functions run.
+    let out = yaml_at(&dir, "import { app } from \"lib.cleat\"\nexport app(\"x\")[1]");
+    assert_eq!(out, "kind: Service\nmetadata:\n  name: x\nspec:\n  type: ClusterIP\n");
+}
+
+#[test]
+fn data_imports() {
+    let dir = fixture_dir(
+        "data",
+        &[("d.yaml", "replicas: 2\nports: [80, 443]\n"), ("d.json", "{\"name\": \"x\"}"), ("t.txt", "line 1\nline 2\n"), ("multi.yaml", "a: 1\n---\na: 2\n")],
+    );
+    let out = yaml_at(
+        &dir,
+        "import d from \"d.yaml\" with { type: \"yaml\" }\nimport j from \"d.json\" with { type: \"json\" }\nimport t from \"t.txt\" with { type: \"text\" }\nimport m from \"multi.yaml\" with { type: \"yaml\" }\nexport { r: d.replicas + 1, p: d.ports[1], nm: j.name, t, count: len(m) }",
+    );
+    assert_eq!(out, "r: 3\np: 443\nnm: x\nt: |\n  line 1\n  line 2\ncount: 2\n");
+    let errs = |body: &str| check_source_at(body, Some(&dir)).errors.into_iter().map(|e| e.msg).collect::<Vec<_>>().join("\n");
+    assert!(errs("import d from \"d.yaml\" with { type: \"yaml\" }\nlet s: Str = d.replicas").contains("expected `Str`, found `Int`"));
+    assert!(errs("import d from \"d.yaml\"").contains("needs `with { type:"));
+    assert!(errs("import d from \"d.yaml\" with { type: \"toml\" }").contains("unsupported import type `toml`"));
+    assert!(errs("import * as d from \"d.json\" with { type: \"json\" }").contains("use a default import"));
+}
+
+fn yaml_at(dir: &Path, src: &str) -> String {
+    match export_at(src, Some(dir), vec![]) {
+        Ok((_, comps)) => emit::to_yaml_stream(&targets::plain(&comps)),
+        Err(ExportError::Check(o)) => panic!("{:?}", o.errors),
+        Err(ExportError::Eval(e)) => panic!("{:?}", e),
+    }
+}
+
+#[test]
+fn multi_line_strings() {
+    let out = yaml("let port = 80\nexport { conf: \"\"\"\n    server {\n      listen \\(port);  # \"quoted\" \\\\\n    }\n    \"\"\" }", &[]);
+    assert_eq!(out, "conf: |-\n  server {\n    listen 80;  # \"quoted\" \\\n  }\n");
+    err("let a = \"\"\"\n  x\n y\n  \"\"\"", "indented less than the closing quotes");
+    err("let a = \"\"\"x\n  \"\"\"", "starts on the line after the opening quotes");
+    err("let a = \"\"\"\n  x \"\"\"", "must be on its own line");
 }

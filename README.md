@@ -22,8 +22,8 @@ Import the Kubernetes OpenAPI spec and your CRDs; `apiVersion` and `kind`
 fill themselves in, and descriptions show on hover:
 
 ```ts
-import k8s from "../schemas/kubernetes-1.31.json"
-import cm from "./crds/cert-manager.crds.yaml"
+import * as k8s from "../schemas/kubernetes-1.31.json"
+import * as cm from "./crds/cert-manager.crds.yaml"
 
 export k8s.Deployment { metadata.name: "web", spec: { replicas: 2, ... } }
 export cm.Certificate { metadata.name: "web-tls", spec: { secretName: "web-tls", ... } }
@@ -35,7 +35,9 @@ Download the schema the example uses (or another version) with:
 schemas/fetch.sh 1.31
 ```
 
-`cleat gen <schema>` prints the generated Cleat types.
+`cleat gen <schema>` prints the generated Cleat types. Imports follow
+ECMAScript: `import * as ns`, `import { A, B }`, and data files with
+`import conf from "./nginx.conf" with { type: "text" }` (or `"json"`/`"yaml"`).
 
 ## Shared bases and environment overlays
 
@@ -44,7 +46,7 @@ the result with `with` (the role of Kustomize overlays):
 
 ```ts
 // examples/overlays/prod.cleat
-import base from "./base.cleat"
+import * as base from "./base.cleat"
 input image: Str
 
 export api = base.app("api", image) with {
