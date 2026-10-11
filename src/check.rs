@@ -21,6 +21,7 @@ pub struct Outcome {
     /// What this program offers when imported as a module.
     pub fns: Vec<(String, Signature)>,
     pub globals: Vec<(String, Ty)>,
+    pub global_defs: HashMap<String, DefSite>,
     /// Completion candidates, when the program contains the completion placeholder
     /// (see `complete.rs`).
     pub completions: Option<Vec<Completion>>,
@@ -61,6 +62,26 @@ pub struct Hover {
     pub text: String,
     /// Documentation (Markdown), e.g. from OpenAPI descriptions.
     pub doc: Option<String>,
+    /// Where the name is defined, for go-to-definition.
+    pub def: Option<DefSite>,
+}
+
+/// A definition's location: in the checked file (`file: None`) or another file.
+#[derive(Debug, Clone, PartialEq)]
+pub struct DefSite {
+    pub file: Option<PathBuf>,
+    pub span: Span,
+}
+
+impl DefSite {
+    fn here(span: Span) -> Option<DefSite> {
+        Some(DefSite { file: None, span })
+    }
+
+    /// Seen from an importer: a site in the module's own file gets that file's path.
+    fn from_module(d: &Option<DefSite>, module: &Path) -> Option<DefSite> {
+        d.as_ref().map(|d| DefSite { file: Some(d.file.clone().unwrap_or_else(|| module.to_path_buf())), span: d.span })
+    }
 }
 
 /// A function signature as seen by importers.
@@ -68,15 +89,17 @@ pub struct Hover {
 pub struct Signature {
     pub params: Vec<(String, Ty, Option<Expr>)>,
     pub ret: Ty,
+    pub def: Option<DefSite>,
 }
 
-/// A checked `.cleat` module, cached by path and modification time.
+/// A checked `.cleat` module, cached until any file it read (itself or its imports) changes.
 pub struct CheckedModule {
     pub outcome: Outcome,
+    /// Every file read while checking it, transitively, with what was read.
+    pub deps: Vec<(PathBuf, crate::modules::Stamp)>,
 }
 
-type CheckedCache =
-    std::sync::Mutex<HashMap<(PathBuf, Option<PathBuf>), (std::time::SystemTime, std::sync::Arc<CheckedModule>)>>;
+type CheckedCache = std::sync::Mutex<HashMap<(PathBuf, Option<PathBuf>), std::sync::Arc<CheckedModule>>>;
 
 thread_local! {
     /// Modules being checked, innermost last (for import cycle detection).
@@ -88,12 +111,14 @@ pub fn checked_module(path: &Path, root: Option<&Path>) -> Result<std::sync::Arc
     static CACHE: std::sync::OnceLock<CheckedCache> = std::sync::OnceLock::new();
     let cache = CACHE.get_or_init(Default::default);
     let canon = path.canonicalize().map_err(|e| format!("cannot read `{}`: {e}", path.display()))?;
-    let mtime = std::fs::metadata(&canon).and_then(|m| m.modified()).unwrap_or(std::time::SystemTime::UNIX_EPOCH);
     let key = (canon.clone(), root.map(Path::to_path_buf));
-    if let Some((t, c)) = cache.lock().unwrap().get(&key) {
-        if *t == mtime {
-            return Ok(c.clone());
+    let hit = cache.lock().unwrap().get(&key).cloned();
+    if let Some(c) = hit.filter(|c| crate::modules::fresh(&c.deps)) {
+        // Whoever is recording dependencies depends on these files too.
+        for (p, st) in &c.deps {
+            crate::modules::record(p, st.clone());
         }
+        return Ok(c);
     }
     let cycle = CHECKING.with(|s| {
         let s = s.borrow();
@@ -106,12 +131,15 @@ pub fn checked_module(path: &Path, root: Option<&Path>) -> Result<std::sync::Arc
     if let Some(c) = cycle {
         return Err(format!("import cycle: {c}"));
     }
-    let module = crate::modules::load(&canon)?;
-    CHECKING.with(|s| s.borrow_mut().push(canon.clone()));
-    let outcome = check_program_in(&module.items, canon.parent(), root);
-    CHECKING.with(|s| s.borrow_mut().pop());
-    let checked = std::sync::Arc::new(CheckedModule { outcome });
-    cache.lock().unwrap().insert(key, (mtime, checked.clone()));
+    let (result, deps) = crate::modules::recording(|| {
+        let module = crate::modules::load(&canon)?;
+        CHECKING.with(|s| s.borrow_mut().push(canon.clone()));
+        let outcome = check_program_in(&module.items, canon.parent(), root);
+        CHECKING.with(|s| s.borrow_mut().pop());
+        Ok::<Outcome, String>(outcome)
+    });
+    let checked = std::sync::Arc::new(CheckedModule { outcome: result?, deps });
+    cache.lock().unwrap().insert(key, checked.clone());
     Ok(checked)
 }
 
@@ -120,6 +148,7 @@ struct FnSig {
     params: Vec<(String, Ty, Option<Expr>)>,
     ret: Ty,
     index: usize,
+    def: Option<DefSite>,
 }
 
 /// A pattern with its type annotations resolved.
@@ -145,6 +174,7 @@ pub fn check_program_in(items: &[Item], base: Option<&Path>, root: Option<&Path>
         ctx: TypeCtx::default(),
         fns: HashMap::new(),
         scope: Vec::new(),
+        scope_defs: Vec::new(),
         hyps: Vec::new(),
         cur_fn: "<top level>".into(),
         cur_index: None,
@@ -157,7 +187,10 @@ pub fn check_program_in(items: &[Item], base: Option<&Path>, root: Option<&Path>
     };
     c.run(items);
     let mut fns: Vec<(String, Signature)> =
-        c.fns.iter().map(|(n, s)| (n.clone(), Signature { params: s.params.clone(), ret: s.ret.clone() })).collect();
+        c.fns
+            .iter()
+            .map(|(n, s)| (n.clone(), Signature { params: s.params.clone(), ret: s.ret.clone(), def: s.def.clone() }))
+            .collect();
     fns.sort_by(|a, b| a.0.cmp(&b.0));
     c.out.fns = fns;
     let globals: Vec<(String, Ty)> = c
@@ -166,6 +199,13 @@ pub fn check_program_in(items: &[Item], base: Option<&Path>, root: Option<&Path>
         .filter_map(|n| c.scope.iter().rev().find(|(s, _)| s == n).map(|(_, t)| (n.clone(), t.clone())))
         .collect();
     c.out.globals = globals;
+    for n in &c.global_names {
+        if let Some(i) = c.scope.iter().rposition(|(s, _)| s == n) {
+            if let Some(d) = c.scope_defs[i].clone() {
+                c.out.global_defs.insert(n.clone(), d);
+            }
+        }
+    }
     let mut out = c.out;
     out.ctx = c.ctx;
     out.errors.sort_by_key(|d| (d.span.line, d.span.col));
@@ -200,6 +240,8 @@ struct Checker {
     fns: HashMap<String, FnSig>,
     /// Variables in scope, innermost last.
     scope: Vec<(String, Ty)>,
+    /// Where each scope entry was defined (parallel to `scope`).
+    scope_defs: Vec<Option<DefSite>>,
     /// Path conditions and facts known at the current program point.
     hyps: Vec<Expr>,
     cur_fn: String,
@@ -250,6 +292,7 @@ impl Checker {
 
     fn reset(&mut self, m: Marks) {
         self.scope.truncate(m.0);
+        self.scope_defs.truncate(m.0);
         self.hyps = m.1;
     }
 
@@ -267,11 +310,15 @@ impl Checker {
     }
 
     fn hover(&mut self, span: Span, token: &str, text: String) {
-        self.out.hovers.push(Hover { span, len: token.chars().count(), text, doc: None });
+        self.out.hovers.push(Hover { span, len: token.chars().count(), text, doc: None, def: None });
     }
 
     fn hover_doc(&mut self, span: Span, token: &str, text: String, doc: Option<String>) {
-        self.out.hovers.push(Hover { span, len: token.chars().count(), text, doc });
+        self.out.hovers.push(Hover { span, len: token.chars().count(), text, doc, def: None });
+    }
+
+    fn hover_def(&mut self, span: Span, token: &str, text: String, doc: Option<String>, def: Option<DefSite>) {
+        self.out.hovers.push(Hover { span, len: token.chars().count(), text, doc, def });
     }
 
     /// Follow aliases that are just other names (`k8s.Deployment` -> `k8s.apps.v1.Deployment`).
@@ -386,7 +433,7 @@ impl Checker {
         if self.ctx.failed_namespaces.contains(hidden) {
             // Already reported at the import; make the name usable without further errors.
             self.ctx.alias_src.insert(local.to_string(), TypeExpr { kind: TypeKind::Named("Json".into()), span: sp });
-            self.scope.push((local.to_string(), Ty::Error));
+            self.push_scope(local, Ty::Error, DefSite::here(sp));
             return;
         }
         let mut found = false;
@@ -403,7 +450,8 @@ impl Checker {
             found = true;
         }
         if let Some(t) = self.lookup(&q).cloned() {
-            self.scope.push((local.to_string(), t));
+            let def = self.def_of(&q);
+            self.push_scope(local, t, def);
             self.global_names.push(local.to_string());
             found = true;
         }
@@ -462,8 +510,12 @@ impl Checker {
             .filter_map(|i| if let Item::Type { name, .. } = i { Some(name.as_str()) } else { None })
             .collect();
         for item in &module.items {
-            if let Item::Type { name, ty, .. } = item {
+            if let Item::Type { name, ty, span } = item {
                 self.ctx.alias_src.insert(format!("{prefix}{name}"), qualify(ty, &prefix, &locals));
+                if let Some(generated) = &module.generated {
+                    let def = DefSite { file: Some(generated.clone()), span: *span };
+                    self.ctx.alias_defs.insert(format!("{prefix}{name}"), def);
+                }
             }
         }
         for (k, d) in &module.docs {
@@ -496,11 +548,18 @@ impl Checker {
         }
         for (name, sig) in &out.fns {
             let params = sig.params.iter().map(|(p, t, d)| (p.clone(), q(t), d.clone())).collect();
-            self.fns.insert(format!("{prefix}{name}"), FnSig { params, ret: q(&sig.ret), index: usize::MAX });
+            let def = DefSite::from_module(&sig.def, full);
+            self.fns.insert(format!("{prefix}{name}"), FnSig { params, ret: q(&sig.ret), index: usize::MAX, def });
         }
         for (name, t) in &out.globals {
             let t = q(t);
-            self.scope.push((format!("{prefix}{name}"), t));
+            let def = DefSite::from_module(&out.global_defs.get(name).cloned(), full);
+            self.push_scope(&format!("{prefix}{name}"), t, def);
+        }
+        for (name, d) in &out.ctx.alias_defs {
+            if let Some(d) = DefSite::from_module(&Some(d.clone()), full) {
+                self.ctx.alias_defs.insert(format!("{prefix}{name}"), d);
+            }
         }
         // Resolve the types the signatures and constants mention, so they are checked against.
         let mut names = Vec::new();
@@ -576,6 +635,7 @@ impl Checker {
                     self.error(*span, format!("type `{name}` is already defined"));
                 } else {
                     self.ctx.alias_src.insert(name.clone(), ty.clone());
+                    self.ctx.alias_defs.insert(name.clone(), DefSite { file: None, span: *span });
                 }
             }
         }
@@ -703,10 +763,12 @@ impl Checker {
                 self.check(d, &t);
             }
             self.bind_var(&p.name, t.clone(), p.span);
+            self.hover_def(p.span, &p.name, format!("{}: {t}", p.name), None, DefSite::here(p.span));
             params.push((p.name.clone(), t, p.default.clone()));
         }
         let ret_ann = f.ret.as_ref().map(|te| self.resolve_te(te));
-        self.fns.insert(f.name.clone(), FnSig { params, ret: ret_ann.clone().unwrap_or(Ty::Error), index });
+        let def = DefSite::here(f.span);
+        self.fns.insert(f.name.clone(), FnSig { params, ret: ret_ann.clone().unwrap_or(Ty::Error), index, def });
         let saved = (std::mem::replace(&mut self.cur_fn, f.name.clone()), self.cur_index.replace(index));
         let ret = match ret_ann {
             Some(t) => {
@@ -725,13 +787,100 @@ impl Checker {
     fn drain_type_diags(&mut self) {
         let ds = std::mem::take(&mut self.ctx.diags);
         self.out.errors.extend(ds);
+        self.take_type_completion();
     }
 
     fn quiet_resolve(&mut self, te: &TypeExpr) -> Ty {
         let n = self.ctx.diags.len();
         let t = self.ctx.resolve(te);
         self.ctx.diags.truncate(n);
+        self.take_type_completion();
         t
+    }
+
+    /// Completion in a type position, recorded by type resolution.
+    fn take_type_completion(&mut self) {
+        match self.ctx.completion.take() {
+            Some(crate::types::TypeCompletion::Fields(r, owner)) => self.complete_fields(&r, &owner, &[]),
+            Some(crate::types::TypeCompletion::Names(Some(ns))) => self.complete_type_names(Some(&ns)),
+            Some(crate::types::TypeCompletion::Names(None)) => self.complete_type_names(None),
+            None => {}
+        }
+    }
+
+    fn complete_type_names(&mut self, ns: Option<&str>) {
+        let prefix = ns.map(|n| format!("{n}.")).unwrap_or_default();
+        let mut items: Vec<Completion> = Vec::new();
+        let mut push = |label: &str, kind, detail: Option<String>| {
+            if !items.iter().any(|c| c.label == label) {
+                items.push(Completion { label: label.into(), kind, detail, doc: None, insert: label.into(), preferred: false });
+            }
+        };
+        if ns.is_none() {
+            for b in BUILTIN_TYPES {
+                push(b, CompletionKind::Type, None);
+            }
+        }
+        let mut names: Vec<String> = self.ctx.alias_src.keys().filter(|k| k.starts_with(&prefix) && !k.contains('#')).cloned().collect();
+        names.sort();
+        for n in names {
+            let rest = &n[prefix.len()..];
+            if self.hidden_labels.keys().any(|h| rest.starts_with(&format!("{h}."))) {
+                continue;
+            }
+            match rest.split_once('.') {
+                Some((group, _)) => push(group, CompletionKind::Module, None),
+                None => {
+                    let def = self.ctx.aliases.get(&n).map(|t| format!("type {n} = {t}"));
+                    push(rest, CompletionKind::Type, def.or(Some(format!("type {n}"))));
+                }
+            }
+        }
+        self.offer(items);
+    }
+
+    /// Patterns for a `match` arm: literals of the scrutinee's type, discriminated
+    /// record shapes (`{ kind: "Service", .. }`), and `_`.
+    fn complete_patterns(&mut self, t: &Ty) {
+        let ms = self.ctx.members(t);
+        let mut items = Vec::new();
+        let records: Vec<Rec> = ms.iter().filter_map(|m| if let Ty::Record(r) = self.ctx.shape(m) { Some(r) } else { None }).collect();
+        // A field with a different literal type in every record member discriminates the union.
+        let discriminant = records.first().and_then(|r0| {
+            r0.fields.iter().map(|f| f.name.clone()).find(|name| {
+                let lits: Vec<Ty> = records
+                    .iter()
+                    .filter_map(|r| r.get(name).map(|f| self.ctx.shape(&f.ty)).filter(|t| matches!(t, Ty::Lit(_))))
+                    .collect();
+                records.len() > 1
+                    && lits.len() == records.len()
+                    && lits.iter().enumerate().all(|(i, a)| lits[i + 1..].iter().all(|b| b != a))
+            })
+        });
+        for m in &ms {
+            match (self.ctx.shape(m), &discriminant) {
+                (Ty::Lit(l), _) => items.push(format!("{l}")),
+                (Ty::Record(r), Some(d)) => {
+                    if let Some(Ty::Lit(l)) = r.get(d).map(|f| self.ctx.shape(&f.ty)) {
+                        items.push(format!("{{ {}: {l}, .. }}", fmt_key(d)));
+                    }
+                }
+                _ => {}
+            }
+        }
+        items.push("_".into());
+        let items = items
+            .into_iter()
+            .map(|p| Completion {
+                label: p.clone(),
+                kind: CompletionKind::Value,
+                detail: None,
+                doc: None,
+                insert: format!("{p} => "),
+                preferred: p != "_",
+            })
+            .collect();
+        self.offer(items);
     }
 
     fn resolve_te(&mut self, te: &TypeExpr) -> Ty {
@@ -747,9 +896,9 @@ impl Checker {
             TypeKind::Refine(b, p) => {
                 self.check_type_preds(b);
                 let base = self.quiet_resolve(b);
-                self.scope.push(("self".to_string(), base));
+                self.push_scope("self", base, None);
                 let t = self.synth(p);
-                self.scope.pop();
+                self.pop_scope();
                 if !self.sub(&t, &Ty::Bool) {
                     self.error(p.span, format!("refinement predicate must be `Bool`, found `{t}`"));
                 }
@@ -783,9 +932,9 @@ impl Checker {
                         }
                         PatchOp::Where(pred) => {
                             let at = self.ctx.type_at(&base, &p.path).unwrap_or(Ty::Error);
-                            self.scope.push(("self".to_string(), at));
+                            self.push_scope("self", at, None);
                             let t = self.synth(pred);
-                            self.scope.pop();
+                            self.pop_scope();
                             if !self.sub(&t, &Ty::Bool) {
                                 self.error(pred.span, format!("refinement predicate must be `Bool`, found `{t}`"));
                             }
@@ -798,7 +947,8 @@ impl Checker {
                 if self.ctx.aliases.contains_key(n) {
                     let text = self.alias_text(n);
                     let doc = self.type_doc(n);
-                    self.hover_doc(te.span, n, text, doc);
+                    let def = self.type_def(n);
+                    self.hover_def(te.span, n, text, doc, def);
                 }
             }
             TypeKind::Lit(_) => {}
@@ -819,7 +969,29 @@ impl Checker {
             // Facts about the outer variable no longer describe this name.
             self.hyps.retain(|h| !mentions(h, name));
         }
+        self.push_scope(name, t, DefSite::here(span));
+    }
+
+    fn push_scope(&mut self, name: &str, t: Ty, def: Option<DefSite>) {
         self.scope.push((name.to_string(), t));
+        self.scope_defs.push(def);
+    }
+
+    fn pop_scope(&mut self) {
+        self.scope.pop();
+        self.scope_defs.pop();
+    }
+
+    /// Where the innermost variable `name` was defined.
+    fn def_of(&self, name: &str) -> Option<DefSite> {
+        let i = self.scope.iter().rposition(|(n, _)| n == name)?;
+        self.scope_defs[i].clone()
+    }
+
+    /// Where a type alias is defined (following plain renames to the real definition).
+    fn type_def(&self, name: &str) -> Option<DefSite> {
+        let canon = self.canonical(name);
+        self.ctx.alias_defs.get(&canon).or_else(|| self.ctx.alias_defs.get(name)).cloned()
     }
 
     /// Bind a variable and record what its type tells us about it.
@@ -864,7 +1036,8 @@ impl Checker {
             self.hyps.push(if positive { c.clone() } else { c.negate() });
         }
         for (n, t) in self.narrowings(c, positive) {
-            self.scope.push((n, t));
+            let def = self.def_of(&n);
+            self.push_scope(&n, t, def);
         }
     }
 
@@ -1418,7 +1591,8 @@ impl Checker {
                     if self.lookup(root).is_none() && self.namespaces.contains(root) {
                         if let Some(t) = self.lookup(&q).cloned() {
                             let label_s = label.to_string();
-                            self.hover(e.span, &label_s, format!("{q}: {t}"));
+                            let def = self.def_of(&q);
+                            self.hover_def(e.span, &label_s, format!("{q}: {t}"), None, def);
                             return t;
                         }
                         let candidates: Vec<String> =
@@ -1458,7 +1632,8 @@ impl Checker {
                 self.drain_type_diags();
                 let text = self.alias_text(tname);
                 let doc = self.type_doc(tname);
-                self.hover_doc(e.span, tname, text, doc);
+                let def = self.type_def(tname);
+                self.hover_def(e.span, tname, text, doc, def);
                 let t = Ty::Alias(tname.clone());
                 self.check(obj, &t);
                 t
@@ -1515,7 +1690,8 @@ impl Checker {
         }
         if let Some(t) = self.lookup(n).cloned() {
             if n != "self" {
-                self.hover(span, n, format!("{n}: {t}"));
+                let def = self.def_of(n);
+                self.hover_def(span, n, format!("{n}: {t}"), None, def);
             }
             return t;
         }
@@ -2357,7 +2533,13 @@ impl Checker {
                 self.error(span, format!("`{name}` calls itself; recursion is not allowed, so evaluation always terminates"));
                 return Ty::Error;
             }
-            self.hover(span, name, Self::fn_sig_text(name, &sig));
+            let short = name.rsplit('.').next().unwrap_or(name);
+            self.hover_def(span, name, Self::fn_sig_text(name, &sig), None, sig.def.clone());
+            if short != name {
+                // `lib.f(...)`: the hover/definition also works on `f` alone.
+                let at = Span { line: span.line, col: span.col + (name.len() - short.len()) as u32 };
+                self.hover_def(at, short, Self::fn_sig_text(name, &sig), None, sig.def.clone());
+            }
             return self.call_user(name, &sig, args, span);
         }
         if BUILTINS.contains(&name) {
@@ -2596,7 +2778,11 @@ impl Checker {
     fn bind_pat(&mut self, p: &RPat, t: &Ty, subject: Option<&Expr>) {
         match p {
             RPat::Wild => {}
-            RPat::Bind(x, span) => self.bind_var(x, t.clone(), *span),
+            RPat::Bind(x, _) if x == COMPLETE_VALUE => self.complete_patterns(t),
+            RPat::Bind(x, span) => {
+                self.bind_var(x, t.clone(), *span);
+                self.hover_def(*span, x, format!("{x}: {t}"), None, DefSite::here(*span));
+            }
             RPat::Typed(name, ty, span) => {
                 let n = self.ctx.narrow(t, ty);
                 let bound = if n == Ty::Never {
@@ -2606,6 +2792,7 @@ impl Checker {
                     n
                 };
                 if let Some(x) = name {
+                    self.hover_def(*span, x, format!("{x}: {bound}"), None, DefSite::here(*span));
                     self.bind_var(x, bound, *span);
                 }
             }

@@ -1,7 +1,11 @@
 //! Loading imported modules: Cleat files, OpenAPI documents and CRDs.
-//! Loaded modules are cached by path and modification time, so the language
-//! server can re-check on every keystroke without re-reading large schemas.
+//!
+//! Files are read through an overlay of open editor buffers (set by the
+//! language server), so unsaved edits to an imported file are seen at once.
+//! Loads are cached by a stamp (buffer version or file modification time), and
+//! every load is recorded so callers can tell which files a result depends on.
 
+use std::cell::RefCell;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock};
@@ -17,9 +21,87 @@ pub struct Module {
     pub docs: Vec<(String, String)>,
     /// A `.cleat` source module (checked and evaluated on its own), as opposed to a schema.
     pub is_source: bool,
+    /// For a schema: the generated Cleat source, written to disk so editors can open it.
+    pub generated: Option<PathBuf>,
 }
 
-type Cache = Mutex<HashMap<PathBuf, (SystemTime, Arc<Module>)>>;
+/// What a cached result was computed from: an editor buffer version or a file's modification time.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Stamp {
+    Buffer(u64),
+    Disk(SystemTime),
+    Missing,
+}
+
+type Overlay = Mutex<HashMap<PathBuf, (u64, Arc<String>)>>;
+
+fn overlay() -> &'static Overlay {
+    static OVERLAY: OnceLock<Overlay> = OnceLock::new();
+    OVERLAY.get_or_init(Default::default)
+}
+
+fn canon(path: &Path) -> PathBuf {
+    path.canonicalize().unwrap_or_else(|_| path.to_path_buf())
+}
+
+/// Use `text` instead of the file's contents (an open, possibly unsaved, editor buffer).
+pub fn set_overlay(path: &Path, text: String) {
+    static VERSION: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+    let v = VERSION.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    overlay().lock().unwrap().insert(canon(path), (v, Arc::new(text)));
+}
+
+pub fn clear_overlay(path: &Path) {
+    overlay().lock().unwrap().remove(&canon(path));
+}
+
+pub fn stamp(path: &Path) -> Stamp {
+    let p = canon(path);
+    if let Some((v, _)) = overlay().lock().unwrap().get(&p) {
+        return Stamp::Buffer(*v);
+    }
+    match std::fs::metadata(&p).and_then(|m| m.modified()) {
+        Ok(t) => Stamp::Disk(t),
+        Err(_) => Stamp::Missing,
+    }
+}
+
+/// A file's text: the editor buffer if one is open, else the file on disk.
+pub fn read_source(path: &Path) -> Result<String, String> {
+    if let Some((_, text)) = overlay().lock().unwrap().get(&canon(path)) {
+        return Ok(text.as_str().to_string());
+    }
+    std::fs::read_to_string(path).map_err(|e| format!("cannot read `{}`: {e}", path.display()))
+}
+
+thread_local! {
+    /// Active dependency recordings (nested: a module check inside a check).
+    static RECORDERS: RefCell<Vec<Vec<(PathBuf, Stamp)>>> = const { RefCell::new(Vec::new()) };
+}
+
+/// Note that the current computation read `path`.
+pub fn record(path: &Path, stamp: Stamp) {
+    RECORDERS.with(|r| {
+        for deps in r.borrow_mut().iter_mut() {
+            deps.push((canon(path), stamp.clone()));
+        }
+    });
+}
+
+/// Run `f` and return the files it read (directly or through imports).
+pub fn recording<T>(f: impl FnOnce() -> T) -> (T, Vec<(PathBuf, Stamp)>) {
+    RECORDERS.with(|r| r.borrow_mut().push(Vec::new()));
+    let out = f();
+    let deps = RECORDERS.with(|r| r.borrow_mut().pop().unwrap_or_default());
+    (out, deps)
+}
+
+/// Whether all recorded dependencies are unchanged.
+pub fn fresh(deps: &[(PathBuf, Stamp)]) -> bool {
+    deps.iter().all(|(p, s)| stamp(p) == *s)
+}
+
+type Cache = Mutex<HashMap<PathBuf, (Stamp, Arc<Module>)>>;
 
 fn cache() -> &'static Cache {
     static CACHE: OnceLock<Cache> = OnceLock::new();
@@ -27,15 +109,18 @@ fn cache() -> &'static Cache {
 }
 
 pub fn load(path: &Path) -> Result<Arc<Module>, String> {
-    let meta = std::fs::metadata(path).map_err(|e| format!("cannot read `{}`: {e}", path.display()))?;
-    let mtime = meta.modified().unwrap_or(SystemTime::UNIX_EPOCH);
-    if let Some((t, m)) = cache().lock().unwrap().get(path) {
-        if *t == mtime {
+    let st = stamp(path);
+    record(path, st.clone());
+    if st == Stamp::Missing {
+        return Err(format!("cannot read `{}`: No such file or directory", path.display()));
+    }
+    if let Some((t, m)) = cache().lock().unwrap().get(&canon(path)) {
+        if *t == st {
             return Ok(m.clone());
         }
     }
     let module = Arc::new(load_uncached(path)?);
-    cache().lock().unwrap().insert(path.to_path_buf(), (mtime, module.clone()));
+    cache().lock().unwrap().insert(canon(path), (st, module.clone()));
     Ok(module)
 }
 
@@ -45,7 +130,7 @@ pub fn generate_source(path: &Path) -> Result<String, String> {
 }
 
 fn read_docs(path: &Path) -> Result<Vec<crate::Value>, String> {
-    let text = std::fs::read_to_string(path).map_err(|e| format!("cannot read `{}`: {e}", path.display()))?;
+    let text = read_source(path)?;
     match path.extension().and_then(|e| e.to_str()) {
         Some("json") => Ok(vec![json::parse(&text).map_err(|e| format!("`{}`: {e}", path.display()))?]),
         Some("yaml" | "yml") => yaml::parse_docs(&text).map_err(|e| format!("`{}`: {e}", path.display())),
@@ -56,8 +141,7 @@ fn read_docs(path: &Path) -> Result<Vec<crate::Value>, String> {
 fn load_uncached(path: &Path) -> Result<Module, String> {
     let is_source = path.extension().and_then(|e| e.to_str()) == Some("cleat");
     let (source, docs) = if is_source {
-        let text = std::fs::read_to_string(path).map_err(|e| format!("cannot read `{}`: {e}", path.display()))?;
-        (text, Vec::new())
+        (read_source(path)?, Vec::new())
     } else {
         let generated = openapi::generate(&read_docs(path)?).map_err(|e| format!("`{}`: {e}", path.display()))?;
         (generated.source, generated.docs)
@@ -81,12 +165,14 @@ fn load_uncached(path: &Path) -> Result<Module, String> {
             _ => {}
         }
     }
-    Ok(Module { items, docs, is_source })
+    let generated = if is_source { None } else { write_generated(path, &source) };
+    Ok(Module { items, docs, is_source, generated })
 }
 
 /// The value of `import x from "path" with { type: kind }`.
 pub fn load_data(path: &Path, kind: &str) -> Result<crate::Value, String> {
-    let text = std::fs::read_to_string(path).map_err(|e| format!("cannot read `{}`: {e}", path.display()))?;
+    record(path, stamp(path));
+    let text = read_source(path)?;
     let at = |e: String| format!("`{}`: {e}", path.display());
     match kind {
         "text" => Ok(crate::Value::Str(text)),
@@ -142,4 +228,21 @@ pub fn resolve_import(base: Option<&Path>, root: Option<&Path>, path: &str) -> R
 pub fn find_root(file: &Path) -> Option<PathBuf> {
     let dir = file.canonicalize().ok()?.parent()?.to_path_buf();
     dir.ancestors().find(|d| d.join(".git").exists()).map(Path::to_path_buf).or(Some(dir))
+}
+
+/// Save a schema's generated Cleat source where editors can open it (go to definition).
+fn write_generated(schema: &Path, source: &str) -> Option<PathBuf> {
+    let name: String = canon(schema)
+        .display()
+        .to_string()
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() || c == '.' || c == '-' { c } else { '_' })
+        .collect();
+    let dir = std::env::temp_dir().join("cleat-generated");
+    std::fs::create_dir_all(&dir).ok()?;
+    let file = dir.join(format!("{name}.cleat"));
+    if std::fs::read_to_string(&file).ok().as_deref() != Some(source) {
+        std::fs::write(&file, source).ok()?;
+    }
+    Some(file)
 }

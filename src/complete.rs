@@ -19,8 +19,9 @@ pub struct Completions {
 }
 
 enum Frame {
-    /// An open bracket, and whether a `:` was seen since the last `,` (object keys vs values).
-    Bracket(char, bool),
+    /// An open bracket at an offset; whether a `:` and a `=>` were seen since the last `,`
+    /// (object keys vs values; `match` patterns vs arm bodies).
+    Bracket { ch: char, colon: bool, arrow: bool, at: usize },
     /// `\(` inside a string; `triple` for `"""` strings.
     Interp(bool),
 }
@@ -69,24 +70,30 @@ fn scan(cs: &[char]) -> Scan {
                 i += 2;
             }
             '"' => string = Some((false, i)),
-            '{' | '[' | '(' => frames.push(Frame::Bracket(c, false)),
+            '{' | '[' | '(' => frames.push(Frame::Bracket { ch: c, colon: false, arrow: false, at: i }),
             '}' | ']' => {
-                if matches!(frames.last(), Some(Frame::Bracket(..))) {
+                if matches!(frames.last(), Some(Frame::Bracket { .. })) {
                     frames.pop();
                 }
             }
             ')' => match frames.pop() {
                 Some(Frame::Interp(triple)) => string = Some((triple, i)),
-                Some(Frame::Bracket(..)) | None => {}
+                Some(Frame::Bracket { .. }) | None => {}
             },
             ':' => {
-                if let Some(Frame::Bracket(_, colon)) = frames.last_mut() {
+                if let Some(Frame::Bracket { colon, .. }) = frames.last_mut() {
                     *colon = true;
                 }
             }
+            '=' if cs.get(i + 1) == Some(&'>') => {
+                if let Some(Frame::Bracket { arrow, .. }) = frames.last_mut() {
+                    *arrow = true;
+                }
+            }
             ',' => {
-                if let Some(Frame::Bracket(_, colon)) = frames.last_mut() {
+                if let Some(Frame::Bracket { colon, arrow, .. }) = frames.last_mut() {
                     *colon = false;
+                    *arrow = false;
                 }
             }
             _ => {}
@@ -101,9 +108,9 @@ fn closers(frames: &[Frame]) -> String {
     let mut out = String::new();
     for f in frames.iter().rev() {
         match f {
-            Frame::Bracket('{', _) => out.push_str(" }"),
-            Frame::Bracket('[', _) => out.push(']'),
-            Frame::Bracket(_, _) => out.push(')'),
+            Frame::Bracket { ch: '{', .. } => out.push_str(" }"),
+            Frame::Bracket { ch: '[', .. } => out.push(']'),
+            Frame::Bracket { .. } => out.push(')'),
             Frame::Interp(false) => out.push_str(")\""),
             Frame::Interp(true) => out.push_str(")\n\"\"\""),
         }
@@ -215,16 +222,33 @@ pub fn complete(src: &str, line: usize, col: usize, base: Option<&Path>, root: O
         let starts_line = before[..w].iter().rev().take_while(|c| **c != '\n').all(|c| c.is_whitespace())
             && before[..w].contains(&'\n');
         let value_ended = prev.is_some_and(|c| !"{[(,:=+-*/%<>!&|?".contains(c));
-        let key_position = match sc.frames.last() {
-            Some(Frame::Bracket('{', false)) => true,
-            Some(Frame::Bracket('{', true)) => starts_line && value_ended && !after_dot,
+        // `match e {`: is the cursor in a pattern (no `=>` yet in this arm)?
+        let in_match_pattern = match sc.frames.last() {
+            Some(Frame::Bracket { ch: '{', arrow: false, at, .. }) => {
+                let head: String = before[..*at].iter().collect();
+                head.rfind("match").is_some_and(|m| {
+                    let after = &head[m + 5..];
+                    let boundary = m == 0 || !is_ident(head[..m].chars().last().unwrap_or(' '));
+                    boundary && after.starts_with(char::is_whitespace) && !after.contains(['{', '}', ';', '\n'])
+                })
+            }
             _ => false,
         };
+        let key_position = !in_match_pattern
+            && match sc.frames.last() {
+                Some(Frame::Bracket { ch: '{', colon: false, .. }) => true,
+                Some(Frame::Bracket { ch: '{', colon: true, .. }) => starts_line && value_ended && !after_dot,
+                _ => false,
+            };
         let head = text(0, w);
         if key_position && !after_dot {
             set_below = keys_after(&cs, cur);
         }
-        let p = if key_position && prev == Some('-') {
+        let p = if in_match_pattern {
+            // A pattern needs an arm body to parse.
+            let name = if after_dot { COMPLETE_NAME } else { COMPLETE_VALUE };
+            format!("{head}{name} => null")
+        } else if key_position && prev == Some('-') {
             format!("{head}{COMPLETE_NAME}") // `-path` in a patch
         } else if key_position {
             let sep = if after_dot || matches!(prev, Some('{' | ',')) { "" } else { ", " };
@@ -237,8 +261,11 @@ pub fn complete(src: &str, line: usize, col: usize, base: Option<&Path>, root: O
         (p, cur - w)
     };
     probe.push_str(&closers(&sc.frames));
-    probe.push('\n');
-    let mut items = check_source_in(&probe, base, root).completions?;
+    // A declaration cut off before its value (`fn f(x: ‸)`, `let s: T‸`) needs one to parse.
+    let mut items = match check_source_in(&format!("{probe}\n"), base, root).completions {
+        Some(items) => items,
+        None => check_source_in(&format!("{probe} = null\n"), base, root).completions?,
+    };
     // The probe ends at the cursor; leave out keys the object sets further down.
     items.retain(|i| !(i.insert.ends_with(": ") && set_below.contains(&i.label)));
     items.sort_by(|a, b| b.preferred.cmp(&a.preferred));

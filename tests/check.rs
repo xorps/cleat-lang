@@ -808,3 +808,29 @@ fn go_to_definition() {
     let (file, _) = def(0, 25).expect("import path");
     assert!(file.unwrap().ends_with("lib.cleat"));
 }
+
+#[test]
+fn completion_of_types_type_patches_and_patterns() {
+    let dir = fixture_dir("complete-types", &[("api.json", SWAGGER)]);
+    let has = |src: &str, want: &[&str], not: &[&str]| {
+        let (items, _) = completions(&dir, &format!("import * as t from \"api.json\"\n{PRELUDE}\n{src}"));
+        for w in want {
+            assert!(items.iter().any(|i| i == w), "missing {w:?} in {items:?} for {src}");
+        }
+        for n in not {
+            assert!(!items.iter().any(|i| i == n), "unexpected {n:?} in {items:?} for {src}");
+        }
+    };
+    // Type positions: local and builtin types, namespaces, and inside a namespace.
+    has("input e: ‸", &["Env", "Str", "Port", "t"], &[]);
+    has("fn f(x: ‸", &["Svc", "Int"], &[]);
+    has("type T = { a: t.‸ }", &["Site", "web"], &[]);
+    has("let s: t.web.v1.‸", &["SiteSpec", "Site"], &[]);
+    // Type-level `with` paths.
+    has("type Small = t.Site with { spec.‸ }", &["host: ", "replicas: "], &[]);
+    // `match` arms: literals, discriminated shapes, `_`.
+    has("fn f(e: Env) -> Int = match e {\n  ‸\n}", &["\"dev\" => ", "\"prod\" => ", "_ => "], &[]);
+    has("fn f(e: Env) -> Int = match e { \"dev\" => 1, ‸ }", &["\"staging\" => "], &[]);
+    has("fn f(r: Svc | Cm) -> Int = match r { ‸ }", &["{ kind: \"Service\", .. } => ", "{ kind: \"ConfigMap\", .. } => "], &[]);
+    has("fn f(r: Svc | Cm) -> Int = match r { x: ‸ }", &["Svc", "Cm"], &[]);
+}

@@ -14,6 +14,7 @@ usage:
   cleat argocd params        Argo CD plugin: announce the file's inputs as parameters
 
 options:
+  --stdin                  read the source from stdin (the file name still places imports)
   --root <dir>             imports must stay inside this directory
                            (default: nearest directory with .git, else the file's directory)
 
@@ -31,6 +32,8 @@ export options:
 
 struct Opts {
     file: String,
+    /// Read the source from stdin; `file` still decides where imports resolve (editor previews).
+    stdin: bool,
     /// Imports must stay inside this directory (default: see `project_root`).
     root: Option<String>,
     vcs: bool,
@@ -101,7 +104,13 @@ fn main() -> ExitCode {
             return ExitCode::from(2);
         }
     };
-    let src = match std::fs::read_to_string(&opts.file) {
+    let read = if opts.stdin {
+        let mut s = String::new();
+        std::io::Read::read_to_string(&mut std::io::stdin(), &mut s).map(|_| s)
+    } else {
+        std::fs::read_to_string(&opts.file)
+    };
+    let src = match read {
         Ok(s) => s,
         Err(e) => {
             eprintln!("error: cannot read {}: {e}", opts.file);
@@ -121,6 +130,7 @@ fn main() -> ExitCode {
 fn parse_opts(args: &[String]) -> Result<Opts, String> {
     let mut o = Opts {
         file: String::new(),
+        stdin: false,
         root: None,
         vcs: false,
         inputs: Vec::new(),
@@ -144,20 +154,9 @@ fn parse_opts(args: &[String]) -> Result<Opts, String> {
             "--argocd-params" => o.inputs.extend(argocd_params()?),
             "--input" => {
                 let path = val()?;
-                let text = std::fs::read_to_string(&path).map_err(|e| format!("cannot read {path}: {e}"))?;
-                let value = if path.ends_with(".yaml") || path.ends_with(".yml") {
-                    match cleat::yaml::parse_docs(&text).map_err(|e| format!("{path}: {e}"))?.as_slice() {
-                        [v] => v.clone(),
-                        _ => return Err(format!("{path}: expected exactly one YAML document")),
-                    }
-                } else {
-                    json::parse(&text).map_err(|e| format!("{path}: {e}"))?
-                };
-                match value {
-                    Value::Obj(es) => o.inputs.extend(es.into_iter().map(|(k, v)| (k, InputValue::Json(v)))),
-                    _ => return Err(format!("{path}: inputs must be an object")),
-                }
+                o.inputs.extend(cleat::read_inputs_file(std::path::Path::new(&path))?);
             }
+            "--stdin" => o.stdin = true,
             "--set" => {
                 let kv = val()?;
                 let (k, v) = kv.split_once('=').ok_or(format!("--set expects name=value, got `{kv}`"))?;
@@ -336,6 +335,7 @@ fn argocd(sub: Option<&str>) -> ExitCode {
             };
             let target = std::env::var("ARGOCD_ENV_CLEAT_TARGET").unwrap_or_else(|_| "argocd".into());
             let opts = Opts {
+                stdin: false,
                 root: argocd_root().map(|p| p.display().to_string()),
                 file,
                 vcs: false,
