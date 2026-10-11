@@ -61,6 +61,13 @@ to, Ingress routes, ConfigMap keys), a namespace filter and search, and the
 sync order of components. Selecting a resource shows its containers, labels,
 relations to other resources and its YAML.
 
+The **Map** draws the resources as a graph, left to right in the order
+traffic and configuration flow: Ingresses, then Services (and autoscalers),
+then workloads, then the ConfigMaps, Secrets, volume claims and service
+accounts they use, with one box per namespace. References to resources that
+aren't in the output appear as dashed nodes, so a broken link is visible
+where it is. Hovering a resource highlights what it's connected to.
+
 It also checks the resources against each other, which the type checker
 can't: a Service that selects no workload, a named `targetPort` no selected
 container has, an Ingress or HorizontalPodAutoscaler pointing at something
