@@ -24,7 +24,7 @@ jobs:
         run: rustup toolchain install
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
       - name: Fetch the Kubernetes schema (used by schema tests and examples)
-        run: schemas/fetch.sh 1.31
+        run: schemas/fetch.sh 1.37
       - run: cargo fmt --check
       - run: cargo clippy --all-targets --locked -- -D warnings
       - run: cargo test --locked

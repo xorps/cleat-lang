@@ -124,9 +124,9 @@ Imports follow ECMAScript: the form says what you get, and `with { type: ... }`
 says how to read a file as a value.
 
 ```ts
-import * as k8s from "../schemas/kubernetes-1.31.json"            // namespace: a schema's types
+import * as k8s from "../schemas/kubernetes-1.37.json"            // namespace: a schema's types
 import * as base from "./base.cleat"                               // namespace: a Cleat module
-import { Deployment, core.v1.Event as Event } from "../schemas/kubernetes-1.31.json"   // named
+import { Deployment, core.v1.Event as Event } from "../schemas/kubernetes-1.37.json"   // named
 import { app, part_of } from "./base.cleat"
 import defaults from "./defaults.yaml" with { type: "yaml" }        // default: data
 import settings from "./settings.json" with { type: "json" }

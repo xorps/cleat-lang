@@ -205,7 +205,7 @@ pub fn load_data(path: &Path, kind: &str) -> Result<crate::Value, String> {
 }
 
 /// The namespace a named import (`import { A } from "path"`) is loaded under:
-/// the file name as an identifier (`kubernetes-1.31.json` -> `kubernetes_1_31`).
+/// the file name as an identifier (`kubernetes-1.37.json` -> `kubernetes_1_31`).
 pub fn hidden_namespace(path: &str, taken: impl Fn(&str) -> bool) -> String {
     let file = Path::new(path).file_name().and_then(|f| f.to_str()).unwrap_or("module");
     let stem = file.rsplit_once('.').map_or(file, |(stem, _ext)| stem);

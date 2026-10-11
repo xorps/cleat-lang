@@ -57,8 +57,8 @@ k apply -n argocd --server-side -f "$install" >/dev/null
 k -n argocd rollout status deploy/argocd-repo-server --timeout=300s
 
 echo "==> images"
-[ -f schemas/kubernetes-1.31.json ] || schemas/fetch.sh 1.31
-cp schemas/kubernetes-1.31.json deploy/argocd/e2e/repo/schemas/
+[ -f schemas/kubernetes-1.37.json ] || schemas/fetch.sh 1.37
+cp schemas/kubernetes-1.37.json deploy/argocd/e2e/repo/schemas/
 docker build -q -f deploy/argocd/Dockerfile -t cleat-cmp:dev .
 docker build -q -f deploy/argocd/e2e/git-server.Dockerfile -t cleat-e2e-git:dev deploy/argocd/e2e
 "$KIND" load docker-image --name "$CLUSTER" cleat-cmp:dev cleat-e2e-git:dev

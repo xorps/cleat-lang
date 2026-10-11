@@ -3,7 +3,7 @@
 //   cleat export examples/webapp.cleat --set env=prod --set image=ghcr.io/acme/api:1.4.2
 //   cleat export examples/webapp.cleat --set env=dev --set image=api:dev --target argocd
 
-import * as k8s from "../schemas/kubernetes-1.31.json"
+import * as k8s from "../schemas/kubernetes-1.37.json"
 
 // Project policy: no NodePort or ExternalName Services (narrows the Kubernetes enum).
 refine k8s.ServiceSpec with { type: "ClusterIP" | "LoadBalancer" }

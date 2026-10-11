@@ -35,7 +35,7 @@ leaves as plain strings (`Service.spec.type`, `imagePullPolicy`,
 allowed values:
 
 ```ts
-import * as k8s from "../schemas/kubernetes-1.31.json"
+import * as k8s from "../schemas/kubernetes-1.37.json"
 import * as cm from "./crds/cert-manager.crds.yaml"
 
 export k8s.Deployment { metadata.name: "web", spec: { replicas: 2, ... } }
@@ -45,7 +45,7 @@ export cm.Certificate { metadata.name: "web-tls", spec: { secretName: "web-tls",
 Download the schema the example uses (or another version) with:
 
 ```sh
-schemas/fetch.sh 1.31
+schemas/fetch.sh 1.37
 ```
 
 `cleat gen <schema>` prints the generated Cleat types. Imports follow
