@@ -171,6 +171,8 @@ pub fn check_program(sess: &Session, items: &[Item], base: Option<&str>, root: O
         cur_index: None,
         labels: Vec::new(),
         namespaces: BTreeSet::new(),
+        imported_files: BTreeMap::new(),
+        unresolved_imports: Vec::new(),
         hidden_labels: BTreeMap::new(),
         global_names: Vec::new(),
         patch_path: String::new(),
@@ -261,6 +263,10 @@ struct Checker {
     hidden_labels: BTreeMap<String, String>,
     /// Imported namespaces (`import * as ns from ...`).
     namespaces: BTreeSet<String>,
+    /// The namespace each imported file was first imported under.
+    imported_files: BTreeMap<String, String>,
+    /// Types named by imported signatures and constants, resolved once the `refine`s are applied.
+    unresolved_imports: Vec<(String, Span)>,
     /// Top-level `let`s and `input`s, offered to importers.
     global_names: Vec<String>,
     /// The `with` path being checked, for messages.
@@ -377,6 +383,9 @@ impl Checker {
         let canon = self.canonical(name);
         let name = canon.as_str();
         let Some(old) = self.ctx.alias_src.get(name).cloned() else {
+            if self.ctx.in_failed_namespace(name) {
+                return; // already reported at the import
+            }
             let msg = self.ctx.unknown_type_message(name);
             return self.error(span, msg);
         };
@@ -565,6 +574,13 @@ impl Checker {
                 return self.error(span, format!("{}: {e}", self.import_label(ns)));
             }
         };
+        if let Some(first) = self.imported_files.get(&full).cloned() {
+            if module.is_source {
+                self.import_source(ns, &full, span);
+            }
+            return self.share_types(&first, ns, span);
+        }
+        self.imported_files.insert(full.clone(), ns.to_string());
         if module.is_source {
             return self.import_source(ns, &full, span);
         }
@@ -596,6 +612,30 @@ impl Checker {
         }
         for (k, d) in &module.docs {
             self.ctx.docs.insert(format!("{prefix}{k}"), d.clone());
+        }
+    }
+
+    /// A file imported again under another namespace (`import * as k8s` and
+    /// `import { Service }` from one schema): its types become aliases of the
+    /// first import's, so a `refine` through either name applies to both.
+    fn share_types(&mut self, first: &str, ns: &str, span: Span) {
+        let (from, to) = (format!("{first}."), format!("{ns}."));
+        let names: Vec<String> = self
+            .ctx
+            .alias_src
+            .keys()
+            .filter(|k| k.starts_with(&from) && !k.contains('#'))
+            .map(|k| k[from.len()..].to_string())
+            .collect();
+        for n in names {
+            let te = TypeExpr {
+                kind: TypeKind::Named(format!("{from}{n}")),
+                span,
+            };
+            self.ctx.alias_src.insert(format!("{to}{n}"), te);
+            if let Some(d) = self.ctx.alias_defs.get(&format!("{from}{n}")).cloned() {
+                self.ctx.alias_defs.insert(format!("{to}{n}"), d);
+            }
         }
     }
 
@@ -663,13 +703,9 @@ impl Checker {
         for (_, t) in &out.globals {
             q(t).alias_names(&mut names);
         }
-        for n in names {
-            self.ctx.resolve(&TypeExpr {
-                kind: TypeKind::Named(n),
-                span,
-            });
-        }
-        self.drain_type_diags();
+        // Not yet: resolving caches the types, and `refine`s (applied after all
+        // imports) must be able to change them first.
+        self.unresolved_imports.extend(names.into_iter().map(|n| (n, span)));
     }
 
     fn field_sig(f: &Field) -> String {
@@ -754,6 +790,13 @@ impl Checker {
                 self.refine(name, patches, *span);
             }
         }
+        for (n, span) in core::mem::take(&mut self.unresolved_imports) {
+            self.ctx.resolve(&TypeExpr {
+                kind: TypeKind::Named(n),
+                span,
+            });
+        }
+        self.drain_type_diags();
         for item in items {
             if let Item::Type { name, ty, span } = item {
                 let named = TypeExpr {

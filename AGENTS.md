@@ -110,6 +110,12 @@ These are deliberate; changing them is a design decision, not a fix.
   everything, so the check silently passes. Whenever you create a `Ty::Alias`
   by hand (typed literals, imported signatures), call `ctx.resolve` on it
   first. This bug has happened twice.
+- **`refine` must run before imported types are resolved.** Resolving
+  caches a type, and a cached type no longer sees a later `refine`, which
+  then silently does nothing. The checker hoists imports, applies all
+  `refine`s, and only then resolves the types that imported signatures and
+  constants mention (`unresolved_imports`). A file imported under two names
+  shares one set of types (`share_types`).
 - **Spans are 1-based line/column in characters.** The language server
   converts to LSP's 0-based UTF-16 positions in `lsp.rs`.
 - **Completion works on unfinished code** by checking a probe: the text up to
