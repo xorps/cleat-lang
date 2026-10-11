@@ -169,6 +169,52 @@
         }
       }
     }
+    // Checks that need the relations above.
+    const first = new Map();
+    for (const r of res) {
+      const earlier = first.get(r.key);
+      if (!earlier) first.set(r.key, r);
+      else note(earlier, "warn", `is defined again in component \`${r.component}\` (first in \`${earlier.component}\`); applying keeps only the last one`);
+    }
+    for (const r of res) {
+      const tpl = podTemplate(r.doc);
+      if (!tpl || !tpl.spec) continue;
+      const podLabels = get(tpl, "meta", "labels");
+      const sel = get(r.doc, "spec", "selector", "matchLabels");
+      if (["Deployment", "StatefulSet", "DaemonSet", "ReplicaSet"].includes(r.kind) && entries(sel).length && !matches(podLabels, sel)) {
+        note(r, "warn", `selector ${entries(sel).map(([k, v]) => `\`${k}=${v}\``).join(", ")} doesn't match its pod template's labels, so the API server will reject it`);
+      }
+      const routedBy = r.in.filter((e) => e.label === "routes to").map((e) => e.from);
+      for (const c of containersOf(tpl.spec)) {
+        const image = c.image || "";
+        const ref = image.split("/").pop();
+        if (image && !image.includes("@") && (!ref.includes(":") || ref.endsWith(":latest"))) {
+          note(r, "warn", `container \`${c.name}\` runs \`${image}\` without a fixed tag, so what runs can change with no change here`);
+        }
+        if (!entries(get(c, "resources", "requests")).length && !entries(get(c, "resources", "limits")).length) {
+          note(r, "note", `container \`${c.name}\` has no resource requests or limits`);
+        }
+        if (!c.init && routedBy.length && !c.readinessProbe) {
+          note(r, "note", `container \`${c.name}\` has no readinessProbe, so Service \`${routedBy[0].name}\` may send it traffic before it's ready`);
+        }
+      }
+    }
+    for (const r of res.filter((x) => x.kind === "NetworkPolicy")) {
+      const d = r.doc;
+      const podSel = get(d, "spec", "podSelector") || {};
+      if (list(podSel.matchExpressions).length) continue; // not evaluated here
+      const sel = podSel.matchLabels || {};
+      const selected = res.filter((w) => w.ns === r.ns && WORKLOADS.has(w.kind) && entries(sel).every(([k, v]) => get(podTemplate(w.doc), "meta", "labels", k) === v));
+      for (const w of selected) link(r, w, "isolates");
+      const types = list(get(d, "spec", "policyTypes"));
+      const ingress = types.length ? types.includes("Ingress") : true;
+      if (ingress && !list(get(d, "spec", "ingress")).length) {
+        for (const w of selected) {
+          const svc = w.in.find((e) => e.label === "routes to");
+          if (svc) note(r, "warn", `blocks all incoming traffic to ${w.kind} \`${w.name}\`, which Service \`${svc.from.name}\` routes to`);
+        }
+      }
+    }
     return { res, problems };
   }
 
@@ -475,6 +521,14 @@
       case "CronJob": return get(d, "spec", "schedule") || "";
       case "ConfigMap": case "Secret": { const n = keysOf(d).length; return `${n} key${n === 1 ? "" : "s"}`; }
       case "PersistentVolumeClaim": return get(d, "spec", "resources", "requests", "storage") || "";
+      case "NetworkPolicy": {
+        const types = list(get(d, "spec", "policyTypes"));
+        const parts = (types.length ? types : ["Ingress"]).map((t) => {
+          const n = list(get(d, "spec", t.toLowerCase())).length;
+          return `${t.toLowerCase()}: ${n ? `${n} rule${n === 1 ? "" : "s"}` : "deny all"}`;
+        });
+        return parts.join(", ");
+      }
       case "HorizontalPodAutoscaler": return `${get(d, "spec", "minReplicas") ?? 1}–${get(d, "spec", "maxReplicas") ?? "?"} replicas`;
       default: return d.apiVersion || "";
     }
@@ -483,7 +537,8 @@
   function mapLayout(rs) {
     const inView = new Set(rs.map((r) => r.key));
     const nodes = new Map();
-    for (const r of rs) nodes.set(r.key, { key: r.key, r, kind: r.kind, name: r.name, ns: r.ns, ghost: false, edges: [] });
+    // A duplicated resource is one node: the first copy, which carries the duplicate warning.
+    for (const r of rs) if (!nodes.has(r.key)) nodes.set(r.key, { key: r.key, r, kind: r.kind, name: r.name, ns: r.ns, ghost: false, edges: [] });
     const edges = [];
     for (const r of rs) {
       for (const e of r.out) if (inView.has(e.to.key)) edges.push({ from: r.key, to: e.to.key, label: e.label });

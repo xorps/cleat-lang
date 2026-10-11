@@ -68,12 +68,24 @@ accounts they use, with one box per namespace. References to resources that
 aren't in the output appear as dashed nodes, so a broken link is visible
 where it is. Hovering a resource highlights what it's connected to.
 
-It also checks the resources against each other, which the type checker
-can't: a Service that selects no workload, a named `targetPort` no selected
-container has, an Ingress or HorizontalPodAutoscaler pointing at something
-that isn't there, and ConfigMaps, Secrets and volume claims that are
-referenced but not in the output (which may be fine, if they already exist
-in the cluster).
+It also checks the resources against each other and against common
+mistakes, which the type checker can't see. Warnings:
+
+- a Service that selects no workload, or targets a named port no selected
+  container has;
+- an Ingress, HorizontalPodAutoscaler or PodDisruptionBudget pointing at
+  something that isn't there;
+- a workload whose selector doesn't match its own pod labels (the API server
+  rejects it);
+- an image with no tag or `:latest`, so what runs can change on its own;
+- a NetworkPolicy that blocks all incoming traffic to a workload a Service
+  routes to;
+- the same resource defined twice (applying keeps only the last).
+
+Notes, which may be fine: ConfigMaps, Secrets, volume claims and service
+accounts referenced but not in the output (they may already exist in the
+cluster), containers without resource requests or limits, and containers
+behind a Service without a readiness probe.
 
 The page updates within a second when the file, or anything it imports,
 changes. Inputs start from `--set` and `--input` and can be edited on the
