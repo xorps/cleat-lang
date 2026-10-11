@@ -1,0 +1,12 @@
+[package]
+name = "cleat"
+description = "The Cleat CLI, language server and Argo CD plugin"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+cleat-core = { path = "../cleat-core" }
+yaml-rust2 = "0.10"

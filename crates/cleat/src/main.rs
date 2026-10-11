@@ -57,7 +57,7 @@ fn main() -> ExitCode {
             return ExitCode::from(2);
         };
         let src = std::fs::read_to_string(file).unwrap_or_default();
-        let root = cleat::modules::find_root(std::path::Path::new(file));
+        let root = cleat::find_root(std::path::Path::new(file));
         let c = cleat::complete::complete(
             &src,
             line.parse().unwrap_or(0),
@@ -83,7 +83,7 @@ fn main() -> ExitCode {
             eprintln!("{USAGE}");
             return ExitCode::from(2);
         };
-        return match cleat::modules::generate_source(std::path::Path::new(path)) {
+        return match cleat::generate_source(std::path::Path::new(path)) {
             Ok(src) => {
                 print!("{src}");
                 ExitCode::SUCCESS
@@ -436,7 +436,7 @@ fn argocd(sub: Option<&str>) -> ExitCode {
 fn project_root(opts: &Opts) -> Option<std::path::PathBuf> {
     match &opts.root {
         Some(r) => Some(r.into()),
-        None => cleat::modules::find_root(std::path::Path::new(&opts.file)),
+        None => cleat::find_root(std::path::Path::new(&opts.file)),
     }
 }
 

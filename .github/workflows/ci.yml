@@ -28,6 +28,10 @@ jobs:
       - run: cargo fmt --check
       - run: cargo clippy --all-targets --locked -- -D warnings
       - run: cargo test --locked
+      - name: Check that cleat-core builds without std (a target with no std at all)
+        run: |
+          rustup target add thumbv7em-none-eabihf
+          cargo clippy -p cleat-core --locked --target thumbv7em-none-eabihf -- -D warnings
       - name: Check examples
         run: |
           cargo run -q -- check examples/quickstart.cleat

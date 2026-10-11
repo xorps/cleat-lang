@@ -115,7 +115,7 @@ Cleat is built from source for now (Rust is installed by `rustup` from
 
 ```sh
 git clone https://github.com/xorps/cleat-lang && cd cleat-lang
-cargo install --path .                 # installs the `cleat` binary
+cargo install --path crates/cleat      # installs the `cleat` binary
 schemas/fetch.sh 1.37                  # Kubernetes OpenAPI spec, checksum-verified
 
 cleat check examples/quickstart.cleat

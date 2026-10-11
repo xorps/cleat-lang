@@ -1,9 +1,8 @@
 //! Static checking (SPEC §7 steps 2–3): bidirectional type checking with
 //! field-aware diagnostics, plus verification conditions for refinements.
 
-use std::collections::HashMap;
-use std::collections::HashSet;
-use std::path::{Path, PathBuf};
+use crate::host::{Session, Stamp, dir_of};
+use crate::prelude::*;
 
 use crate::ast::*;
 use crate::diag::{Diag, Span};
@@ -21,7 +20,7 @@ pub struct Outcome {
     /// What this program offers when imported as a module.
     pub fns: Vec<(String, Signature)>,
     pub globals: Vec<(String, Ty)>,
-    pub global_defs: HashMap<String, DefSite>,
+    pub global_defs: BTreeMap<String, DefSite>,
     /// Completion candidates, when the program contains the completion placeholder
     /// (see `complete.rs`).
     pub completions: Option<Vec<Completion>>,
@@ -69,7 +68,7 @@ pub struct Hover {
 /// A definition's location: in the checked file (`file: None`) or another file.
 #[derive(Debug, Clone, PartialEq)]
 pub struct DefSite {
-    pub file: Option<PathBuf>,
+    pub file: Option<String>,
     pub span: Span,
 }
 
@@ -79,9 +78,9 @@ impl DefSite {
     }
 
     /// Seen from an importer: a site in the module's own file gets that file's path.
-    fn from_module(d: &Option<DefSite>, module: &Path) -> Option<DefSite> {
+    fn from_module(d: &Option<DefSite>, module: &str) -> Option<DefSite> {
         d.as_ref().map(|d| DefSite {
-            file: Some(d.file.clone().unwrap_or_else(|| module.to_path_buf())),
+            file: Some(d.file.clone().unwrap_or_else(|| module.to_string())),
             span: d.span,
         })
     }
@@ -99,52 +98,39 @@ pub struct Signature {
 pub struct CheckedModule {
     pub outcome: Outcome,
     /// Every file read while checking it, transitively, with what was read.
-    pub deps: Vec<(PathBuf, crate::modules::Stamp)>,
-}
-
-type CheckedCache = std::sync::Mutex<HashMap<(PathBuf, Option<PathBuf>), std::sync::Arc<CheckedModule>>>;
-
-thread_local! {
-    /// Modules being checked, innermost last (for import cycle detection).
-    static CHECKING: std::cell::RefCell<Vec<PathBuf>> = const { std::cell::RefCell::new(Vec::new()) };
+    pub deps: Vec<(String, Stamp)>,
 }
 
 /// Check a `.cleat` module on its own (its imports resolve relative to its directory).
-pub fn checked_module(path: &Path, root: Option<&Path>) -> Result<std::sync::Arc<CheckedModule>, String> {
-    static CACHE: std::sync::OnceLock<CheckedCache> = std::sync::OnceLock::new();
-    let cache = CACHE.get_or_init(Default::default);
-    let canon = path
-        .canonicalize()
-        .map_err(|e| format!("cannot read `{}`: {e}", path.display()))?;
-    let key = (canon.clone(), root.map(Path::to_path_buf));
-    let hit = cache.lock().unwrap().get(&key).cloned();
-    if let Some(c) = hit.filter(|c| crate::modules::fresh(&c.deps)) {
+pub fn checked_module(sess: &Session, file: &str, root: Option<&str>) -> Result<Rc<CheckedModule>, String> {
+    let key = (file.to_string(), root.map(str::to_string));
+    if let Some(c) = sess.cached_check(&key).filter(|c| sess.fresh(&c.deps)) {
         // Whoever is recording dependencies depends on these files too.
-        for (p, st) in &c.deps {
-            crate::modules::record(p, st.clone());
+        for (f, st) in &c.deps {
+            sess.record(f, *st);
         }
         return Ok(c);
     }
-    let cycle = CHECKING.with(|s| {
-        let s = s.borrow();
-        s.iter().position(|p| *p == canon).map(|i| {
-            let mut names: Vec<String> = s[i..].iter().map(|p| p.display().to_string()).collect();
-            names.push(canon.display().to_string());
+    let cycle = {
+        let s = sess.checking().borrow();
+        s.iter().position(|f| f == file).map(|i| {
+            let mut names: Vec<String> = s[i..].to_vec();
+            names.push(file.to_string());
             names.join(" -> ")
         })
-    });
+    };
     if let Some(c) = cycle {
         return Err(format!("import cycle: {c}"));
     }
-    let (result, deps) = crate::modules::recording(|| {
-        let module = crate::modules::load(&canon)?;
-        CHECKING.with(|s| s.borrow_mut().push(canon.clone()));
-        let outcome = check_program_in(&module.items, canon.parent(), root);
-        CHECKING.with(|s| s.borrow_mut().pop());
+    let (result, deps) = sess.recording(|| {
+        let module = crate::modules::load(sess, file)?;
+        sess.checking().borrow_mut().push(file.to_string());
+        let outcome = check_program(sess, &module.items, dir_of(file).as_deref(), root);
+        sess.checking().borrow_mut().pop();
         Ok::<Outcome, String>(outcome)
     });
-    let checked = std::sync::Arc::new(CheckedModule { outcome: result?, deps });
-    cache.lock().unwrap().insert(key, checked.clone());
+    let checked = Rc::new(CheckedModule { outcome: result?, deps });
+    sess.cache_check(key, checked.clone());
     Ok(checked)
 }
 
@@ -169,26 +155,23 @@ enum RPat {
     Record(Vec<(String, RPat)>, bool, Span),
 }
 
-/// Check a program; imports are resolved relative to `base` (the file's directory).
-pub fn check_program(items: &[Item], base: Option<&Path>) -> Outcome {
-    check_program_in(items, base, None)
-}
-
-/// Like `check_program`, with every import required to stay inside `root`.
-pub fn check_program_in(items: &[Item], base: Option<&Path>, root: Option<&Path>) -> Outcome {
+/// Check a program whose imports resolve relative to directory `base`, each
+/// required to stay inside `root` when there is one.
+pub fn check_program(sess: &Session, items: &[Item], base: Option<&str>, root: Option<&str>) -> Outcome {
     let mut c = Checker {
-        base: base.map(Path::to_path_buf),
-        root: root.map(Path::to_path_buf),
+        sess: sess.clone(),
+        base: base.map(str::to_string),
+        root: root.map(str::to_string),
         ctx: TypeCtx::default(),
-        fns: HashMap::new(),
+        fns: BTreeMap::new(),
         scope: Vec::new(),
         scope_defs: Vec::new(),
         hyps: Vec::new(),
         cur_fn: "<top level>".into(),
         cur_index: None,
         labels: Vec::new(),
-        namespaces: HashSet::new(),
-        hidden_labels: HashMap::new(),
+        namespaces: BTreeSet::new(),
+        hidden_labels: BTreeMap::new(),
         global_names: Vec::new(),
         patch_path: String::new(),
         out: Outcome::default(),
@@ -262,7 +245,7 @@ fn did_you_mean<'a>(name: &str, candidates: impl Iterator<Item = &'a str>) -> St
 
 struct Checker {
     ctx: TypeCtx,
-    fns: HashMap<String, FnSig>,
+    fns: BTreeMap<String, FnSig>,
     /// Variables in scope, innermost last.
     scope: Vec<(String, Ty)>,
     /// Where each scope entry was defined (parallel to `scope`).
@@ -275,16 +258,17 @@ struct Checker {
     /// the span of the literal they describe.
     labels: Vec<(Span, String)>,
     /// Messages for namespaces created by named imports (`import { A } from "f"`).
-    hidden_labels: HashMap<String, String>,
+    hidden_labels: BTreeMap<String, String>,
     /// Imported namespaces (`import * as ns from ...`).
-    namespaces: HashSet<String>,
+    namespaces: BTreeSet<String>,
     /// Top-level `let`s and `input`s, offered to importers.
     global_names: Vec<String>,
     /// The `with` path being checked, for messages.
     patch_path: String,
-    base: Option<PathBuf>,
+    sess: Session,
+    base: Option<String>,
     /// Imports must resolve inside this directory.
-    root: Option<PathBuf>,
+    root: Option<String>,
     out: Outcome,
 }
 
@@ -457,7 +441,7 @@ impl Checker {
                 ),
             ),
             (ImportForm::Default(x), Some((_, kind, sp))) => {
-                let full = match crate::modules::resolve_import(self.base.as_deref(), self.root.as_deref(), path) {
+                let full = match self.sess.host().resolve(self.base.as_deref(), self.root.as_deref(), path) {
                     Ok(f) => f,
                     Err(e) => {
                         self.error(span, format!("import `{x}`: {e}"));
@@ -467,7 +451,7 @@ impl Checker {
                 if !["json", "yaml", "text"].contains(&kind.as_str()) {
                     return self.error(*sp, format!("unsupported import type `{kind}` (expected \"json\", \"yaml\" or \"text\")"));
                 }
-                match crate::modules::load_data(&full, kind) {
+                match crate::modules::load_data(&self.sess, &full, kind) {
                     Ok(v) => {
                         let t = value_type(&v);
                         self.bind_var(x, t, span);
@@ -569,8 +553,11 @@ impl Checker {
         if !self.namespaces.insert(ns.to_string()) {
             return self.error(span, format!("`{ns}` is already imported"));
         }
-        let loaded = crate::modules::resolve_import(self.base.as_deref(), self.root.as_deref(), path)
-            .and_then(|full| crate::modules::load(&full).map(|m| (full, m)));
+        let loaded = self
+            .sess
+            .host()
+            .resolve(self.base.as_deref(), self.root.as_deref(), path)
+            .and_then(|full| crate::modules::load(&self.sess, &full).map(|m| (full, m)));
         let (full, module) = match loaded {
             Ok(x) => x,
             Err(e) => {
@@ -582,7 +569,7 @@ impl Checker {
             return self.import_source(ns, &full, span);
         }
         let prefix = format!("{ns}.");
-        let locals: HashSet<&str> = module
+        let locals: BTreeSet<&str> = module
             .items
             .iter()
             .filter_map(|i| {
@@ -613,8 +600,9 @@ impl Checker {
     }
 
     /// Import a `.cleat` module: its types, functions and constants become `ns.x`.
-    fn import_source(&mut self, ns: &str, full: &Path, span: Span) {
-        let checked = match checked_module(full, self.root.as_deref()) {
+    fn import_source(&mut self, ns: &str, full: &str, span: Span) {
+        let sess = self.sess.clone();
+        let checked = match checked_module(&sess, full, self.root.as_deref()) {
             Ok(c) => c,
             Err(e) => {
                 self.ctx.failed_namespaces.insert(ns.to_string());
@@ -624,10 +612,10 @@ impl Checker {
         let out = &checked.outcome;
         for e in out.errors.iter().take(5) {
             let label = self.import_label(ns);
-            self.error(span, format!("{label}: {}:{}: {}", full.display(), e.span, e.msg));
+            self.error(span, format!("{label}: {}:{}: {}", full, e.span, e.msg));
         }
         let prefix = format!("{ns}.");
-        let keys: HashSet<&str> = out.ctx.alias_src.keys().map(String::as_str).collect();
+        let keys: BTreeSet<&str> = out.ctx.alias_src.keys().map(String::as_str).collect();
         let q = |t: &Ty| t.map_aliases(&|n| keys.contains(n).then(|| format!("{prefix}{n}")));
         for (name, te) in &out.ctx.alias_src {
             self.ctx
@@ -854,7 +842,7 @@ impl Checker {
             n: &'a str,
             comps: &'a [ComponentDecl],
             stack: &mut Vec<&'a str>,
-            done: &mut HashSet<&'a str>,
+            done: &mut BTreeSet<&'a str>,
             cycles: &mut Vec<(Span, String)>,
         ) {
             if done.contains(n) {
@@ -884,7 +872,7 @@ impl Checker {
             stack.pop();
             done.insert(n);
         }
-        let mut done = HashSet::new();
+        let mut done = BTreeSet::new();
         let mut cycles = Vec::new();
         for (n, _, _) in comps {
             visit(n, comps, &mut Vec::new(), &mut done, &mut cycles);
@@ -922,7 +910,7 @@ impl Checker {
             },
         );
         let saved = (
-            std::mem::replace(&mut self.cur_fn, f.name.clone()),
+            core::mem::replace(&mut self.cur_fn, f.name.clone()),
             self.cur_index.replace(index),
         );
         let ret = match ret_ann {
@@ -940,7 +928,7 @@ impl Checker {
     // ---------- types ----------
 
     fn drain_type_diags(&mut self) {
-        let ds = std::mem::take(&mut self.ctx.diags);
+        let ds = core::mem::take(&mut self.ctx.diags);
         self.out.errors.extend(ds);
         self.take_type_completion();
     }
@@ -1513,7 +1501,7 @@ impl Checker {
                         .filter(|f| {
                             !unknown
                                 .iter()
-                                .any(|u| suggest(u, std::iter::once(f.name.as_str())).is_some())
+                                .any(|u| suggest(u, core::iter::once(f.name.as_str())).is_some())
                         })
                         .collect();
                     for f in missing {
@@ -1572,8 +1560,8 @@ impl Checker {
 
     /// Check object members against a record type. Returns the fields that are
     /// definitely set, and whether keys were computed dynamically.
-    fn check_members(&mut self, ms: &[Member], r: &Rec, shown: &str) -> (HashSet<String>, bool) {
-        let mut guaranteed = HashSet::new();
+    fn check_members(&mut self, ms: &[Member], r: &Rec, shown: &str) -> (BTreeSet<String>, bool) {
+        let mut guaranteed = BTreeSet::new();
         let mut dynamic = false;
         if ms
             .iter()
@@ -1789,7 +1777,7 @@ impl Checker {
             ExprKind::Object(ms) => {
                 let mut fields = Vec::new();
                 let mut dynamic = Vec::new();
-                let mut overridable = HashSet::new();
+                let mut overridable = BTreeSet::new();
                 self.synth_members(ms, &mut fields, &mut dynamic, &mut overridable, false);
                 if dynamic.is_empty() {
                     Ty::Record(Rec { fields, open: false })
@@ -1992,7 +1980,7 @@ impl Checker {
         ms: &[Member],
         fields: &mut Vec<Field>,
         dynamic: &mut Vec<Ty>,
-        overridable: &mut HashSet<String>,
+        overridable: &mut BTreeSet<String>,
         conditional: bool,
     ) {
         let presence = if conditional {
@@ -2045,7 +2033,7 @@ impl Checker {
                     self.check(c, &Ty::Bool);
                     let mk = self.marks();
                     let (mut ft, mut fe) = (Vec::new(), Vec::new());
-                    let mut ov = HashSet::new();
+                    let mut ov = BTreeSet::new();
                     self.assume(c, true);
                     self.synth_members(t, &mut ft, dynamic, &mut ov, conditional);
                     self.reset(mk.clone());
@@ -2074,7 +2062,7 @@ impl Checker {
                     let mk = self.marks();
                     self.bind_loop(a, b.as_deref(), src);
                     let mut fs = Vec::new();
-                    self.synth_members(body, &mut fs, dynamic, &mut HashSet::new(), true);
+                    self.synth_members(body, &mut fs, dynamic, &mut BTreeSet::new(), true);
                     self.reset(mk);
                     dynamic.extend(fs.into_iter().map(|f| f.ty));
                 }
@@ -2085,7 +2073,7 @@ impl Checker {
     fn add_field(
         &mut self,
         fields: &mut Vec<Field>,
-        overridable: &mut HashSet<String>,
+        overridable: &mut BTreeSet<String>,
         f: Field,
         from_spread: bool,
         span: Span,
@@ -2995,7 +2983,7 @@ impl Checker {
             }
             if name == "matches"
                 && let ExprKind::Lit(Lit::Str(re)) = &es[1].kind
-                && let Err(err) = regex::Regex::new(re)
+                && let Err(err) = crate::host::compile_regex(re)
             {
                 self.error(es[1].span, format!("invalid regex: {err}"));
             }
@@ -3303,7 +3291,7 @@ fn merge_records(a: Rec, b: Rec) -> Rec {
 }
 
 /// Rewrite references to a module's own types (`DeploymentSpec`) to their imported names (`k8s.DeploymentSpec`).
-fn qualify(te: &TypeExpr, prefix: &str, locals: &HashSet<&str>) -> TypeExpr {
+fn qualify(te: &TypeExpr, prefix: &str, locals: &BTreeSet<&str>) -> TypeExpr {
     let q = |t: &TypeExpr| qualify(t, prefix, locals);
     let kind = match &te.kind {
         TypeKind::Named(n) if locals.contains(n.as_str()) => TypeKind::Named(format!("{prefix}{n}")),

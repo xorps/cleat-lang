@@ -175,7 +175,7 @@ Schemas are converted to Cleat types (`cleat gen <file>` prints the result):
 | `nullable: true` | `T \| null` |
 | `x-kubernetes-group-version-kind` | `apiVersion`/`kind` become required literal fields, so they fill themselves in |
 | Kubernetes `resource.Quantity` | `Str \| Float` (accepts `cpu: 1` and `cpu: "500m"`) |
-| Kubernetes enum fields typed as plain strings | literal unions, from a curated table (`KUBERNETES_ENUMS` in `src/openapi.rs`): `Service.spec.type`, `imagePullPolicy`, `restartPolicy`, protocols, access modes, update strategies, operators and about 30 more. Each list is the one in the field's own description, and only long-stable enums are included, since `with` can't widen a stale list. |
+| Kubernetes enum fields typed as plain strings | literal unions, from a curated table (`KUBERNETES_ENUMS` in `crates/cleat-core/src/openapi.rs`): `Service.spec.type`, `imagePullPolicy`, `restartPolicy`, protocols, access modes, update strategies, operators and about 30 more. Each list is the one in the field's own description, and only long-stable enums are included, since `with` can't widen a stale list. |
 
 **Names.** OpenAPI definitions keep their group and version:
 `io.k8s.api.apps.v1.Deployment` becomes `apps.v1.Deployment`. A short name

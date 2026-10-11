@@ -30,7 +30,7 @@ RUN --mount=type=bind,source=rust-toolchain.toml,target=rust-toolchain.toml \
 RUN --mount=type=bind,source=rust-toolchain.toml,target=rust-toolchain.toml \
     --mount=type=bind,source=Cargo.toml,target=Cargo.toml \
     --mount=type=bind,source=Cargo.lock,target=Cargo.lock \
-    --mount=type=bind,source=src,target=src \
+    --mount=type=bind,source=crates,target=crates \
     --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/src/target \
     target="$(cat /target-triple)" \

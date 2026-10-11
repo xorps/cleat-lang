@@ -1,11 +1,10 @@
 //! Evaluation (SPEC §7 step 4). Every value crossing an annotation is checked
 //! against its type by `conform`, which also fills in defaults.
 
-use std::cell::RefCell;
-use std::collections::HashMap;
-use std::fmt;
-use std::path::{Path, PathBuf};
-use std::rc::Rc;
+use crate::host::{Session, dir_of};
+use crate::prelude::*;
+use core::cell::RefCell;
+use core::fmt;
 
 use crate::ast::*;
 use crate::diag::Span;
@@ -122,15 +121,17 @@ pub struct Component {
 
 /// Evaluate a checked program and return its exports in source order.
 pub fn run(
+    sess: &Session,
     items: &[Item],
     ctx: TypeCtx,
-    base: Option<&Path>,
-    root: Option<&Path>,
+    base: Option<&str>,
+    root: Option<&str>,
     inputs: Vec<(String, InputValue)>,
 ) -> Result<Vec<Component>, Vec<EvalError>> {
     let mut ev = Evaluator::new(ctx);
-    ev.base = base.map(Path::to_path_buf);
-    ev.root = root.map(Path::to_path_buf);
+    ev.sess = Some(sess.clone());
+    ev.base = base.map(str::to_string);
+    ev.root = root.map(str::to_string);
     let mut errs = Vec::new();
     let mut comps = Vec::new();
 
@@ -144,7 +145,7 @@ pub fn run(
             }
         })
         .collect();
-    let mut provided: HashMap<String, InputValue> = HashMap::new();
+    let mut provided: BTreeMap<String, InputValue> = BTreeMap::new();
     for (name, v) in inputs {
         if !declared.contains(&name.as_str()) {
             let hint = suggest(&name, declared.iter().copied())
@@ -296,30 +297,33 @@ fn at(path: &[String], msg: String) -> String {
 
 struct Evaluator {
     ctx: TypeCtx,
-    fns: HashMap<String, FnDecl>,
+    fns: BTreeMap<String, FnDecl>,
     globals: Vec<(String, Value)>,
     locals: Vec<(String, Value)>,
     trace: Vec<(String, Span)>,
     /// Functions brought in by `import { f }`: local name -> `hidden.f`.
-    fn_aliases: HashMap<String, String>,
+    fn_aliases: BTreeMap<String, String>,
     /// Imported `.cleat` modules, each with its own constants, functions and types.
-    imports: HashMap<String, Rc<RefCell<Evaluator>>>,
+    imports: BTreeMap<String, Rc<RefCell<Evaluator>>>,
+    /// Where imports are read from; `None` when evaluating closed expressions statically.
+    sess: Option<Session>,
     /// Directory imports resolve against.
-    base: Option<PathBuf>,
+    base: Option<String>,
     /// Imports must resolve inside this directory.
-    root: Option<PathBuf>,
+    root: Option<String>,
 }
 
 impl Evaluator {
     fn new(ctx: TypeCtx) -> Self {
         Evaluator {
             ctx,
-            fns: HashMap::new(),
+            fns: BTreeMap::new(),
             globals: Vec::new(),
             locals: Vec::new(),
             trace: Vec::new(),
-            imports: HashMap::new(),
-            fn_aliases: HashMap::new(),
+            imports: BTreeMap::new(),
+            fn_aliases: BTreeMap::new(),
+            sess: None,
             base: None,
             root: None,
         }
@@ -355,27 +359,41 @@ impl Evaluator {
                     .iter()
                     .find(|(k, _, _)| k == "type")
                     .map_or("", |(_, v, _)| v.as_str());
-                let full = crate::modules::resolve_import(self.base.as_deref(), self.root.as_deref(), path)
+                let sess = self.session(span)?;
+                let full = sess
+                    .host()
+                    .resolve(self.base.as_deref(), self.root.as_deref(), path)
                     .map_err(|m| self.error(span, m))?;
-                let v = crate::modules::load_data(&full, kind).map_err(|m| self.error(span, m))?;
+                let v = crate::modules::load_data(&sess, &full, kind).map_err(|m| self.error(span, m))?;
                 self.globals.push((x.clone(), v));
                 Ok(())
             }
         }
     }
 
+    fn session(&self, span: Span) -> Result<Session, EvalError> {
+        self.sess
+            .clone()
+            .ok_or_else(|| self.error(span, "imports are not available here"))
+    }
+
     /// Load an imported `.cleat` module: evaluate its constants and register its functions.
     fn import(&mut self, ns: &str, path: &str, span: Span) -> Result<(), EvalError> {
-        let full = crate::modules::resolve_import(self.base.as_deref(), self.root.as_deref(), path)
+        let sess = self.session(span)?;
+        let full = sess
+            .host()
+            .resolve(self.base.as_deref(), self.root.as_deref(), path)
             .map_err(|m| self.error(span, m))?;
-        let module = crate::modules::load(&full).map_err(|m| self.error(span, m))?;
+        let module = crate::modules::load(&sess, &full).map_err(|m| self.error(span, m))?;
         if !module.is_source {
             return Ok(()); // schemas only contribute types
         }
-        let checked = crate::check::checked_module(&full, self.root.as_deref()).map_err(|m| self.error(span, m))?;
+        let checked =
+            crate::check::checked_module(&sess, &full, self.root.as_deref()).map_err(|m| self.error(span, m))?;
         let mut sub = Evaluator::new(checked.outcome.ctx.clone());
+        sub.sess = Some(sess.clone());
         sub.root = self.root.clone();
-        sub.base = full.canonicalize().ok().and_then(|p| p.parent().map(Path::to_path_buf));
+        sub.base = dir_of(&full);
         let in_module = |e: EvalError| EvalError {
             msg: format!("in module `{ns}` ({}): {}", path, e.msg),
             ..e
@@ -702,7 +720,7 @@ impl Evaluator {
                 }
                 Presence::Optional => {}
                 Presence::Default(e) => {
-                    let saved = std::mem::take(&mut self.locals);
+                    let saved = core::mem::take(&mut self.locals);
                     let d = self.eval(e);
                     self.locals = saved;
                     let d = d.map_err(|e| at(path, format!("evaluating default: {}", e.msg)))?;
@@ -1142,7 +1160,7 @@ impl Evaluator {
                 e
             });
         }
-        builtin(name, vals.into_iter().map(|(_, v, _)| v).collect())
+        builtin(name, vals.into_iter().map(|(_, v, _)| v).collect(), self.sess.as_ref())
             .map_err(|m| self.error(span, format!("{name}: {m}")))
     }
 
@@ -1173,7 +1191,7 @@ impl Evaluator {
             slots[i] = Some((value, at));
         }
         // Bind parameters in the callee's scope; defaults and refinements may use earlier parameters.
-        let saved = std::mem::take(&mut self.locals);
+        let saved = core::mem::take(&mut self.locals);
         self.trace.push((f.name.clone(), span));
         let result = (|| {
             for (p, slot) in f.params.iter().zip(slots) {
@@ -1225,7 +1243,7 @@ fn set_key(entries: &mut Vec<(String, Value, bool)>, k: String, v: Value, from_s
         slot.2 = from_spread;
         return Ok(());
     }
-    let merged = deep_merge(std::mem::replace(&mut slot.1, Value::Null), v, &mut vec![path_key(&k)])?;
+    let merged = deep_merge(core::mem::replace(&mut slot.1, Value::Null), v, &mut vec![path_key(&k)])?;
     slot.1 = merged;
     Ok(())
 }
@@ -1237,7 +1255,7 @@ fn deep_merge(a: Value, b: Value, path: &mut Vec<String>) -> Result<Value, Strin
                 match xs.iter().position(|(xk, _)| *xk == k) {
                     Some(i) => {
                         path.push(path_key(&k));
-                        let x = std::mem::replace(&mut xs[i].1, Value::Null);
+                        let x = core::mem::replace(&mut xs[i].1, Value::Null);
                         xs[i].1 = deep_merge(x, y, path)?;
                         path.pop();
                     }
@@ -1302,7 +1320,7 @@ pub fn builtin_doc(name: &str) -> &'static str {
     }
 }
 
-fn builtin(name: &str, args: Vec<Value>) -> Result<Value, String> {
+fn builtin(name: &str, args: Vec<Value>, sess: Option<&Session>) -> Result<Value, String> {
     use Value::*;
     let bad = |args: &[Value]| {
         format!(
@@ -1333,7 +1351,7 @@ fn builtin(name: &str, args: Vec<Value>) -> Result<Value, String> {
         ("starts_with", [Str(s), Str(p)]) => Bool(s.starts_with(p.as_str())),
         ("ends_with", [Str(s), Str(p)]) => Bool(s.ends_with(p.as_str())),
         ("replace", [Str(s), Str(from), Str(to)]) => Str(s.replace(from.as_str(), to)),
-        ("matches", [Str(s), Str(re)]) => Bool(regex_cached(re)?.is_match(s)),
+        ("matches", [Str(s), Str(re)]) => Bool(regex(sess, re)?.is_match(s)),
         ("min" | "max", [Int(a), Int(b)]) => Int(if name == "min" { *a.min(b) } else { *a.max(b) }),
         ("min" | "max", [a, b]) => match (num(a), num(b)) {
             (Some(x), Some(y)) => Float(if name == "min" { x.min(y) } else { x.max(y) }),
@@ -1362,19 +1380,12 @@ fn builtin(name: &str, args: Vec<Value>) -> Result<Value, String> {
     })
 }
 
-/// Compiled regexes, since refinements from schemas run `matches` for every value.
-fn regex_cached(re: &str) -> Result<regex::Regex, String> {
-    thread_local! {
-        static CACHE: std::cell::RefCell<HashMap<String, regex::Regex>> = Default::default();
+fn regex(sess: Option<&Session>, re: &str) -> Result<Rc<regex_automata::meta::Regex>, String> {
+    match sess {
+        Some(sess) => sess.regex(re),
+        None => crate::host::compile_regex(re).map(Rc::new),
     }
-    CACHE.with(|c| {
-        if let Some(r) = c.borrow().get(re) {
-            return Ok(r.clone());
-        }
-        let r = regex::Regex::new(re).map_err(|e| format!("invalid regex: {e}"))?;
-        c.borrow_mut().insert(re.to_string(), r.clone());
-        Ok(r)
-    })
+    .map_err(|e| format!("invalid regex: {e}"))
 }
 
 // ---------- value patches (`e with { ... }`) ----------
@@ -1419,7 +1430,7 @@ fn apply_patch(v: Value, path: &[Seg], op: &Op, trail: &mut Vec<String>) -> Resu
                 return Ok(Value::Obj(es));
             }
             trail.push(path_key(k));
-            let child = pos.map_or(Value::Null, |i| std::mem::replace(&mut es[i].1, Value::Null));
+            let child = pos.map_or(Value::Null, |i| core::mem::replace(&mut es[i].1, Value::Null));
             let new = apply_patch(child, rest, op, trail)?;
             trail.pop();
             match pos {
@@ -1462,7 +1473,7 @@ fn apply_patch(v: Value, path: &[Seg], op: &Op, trail: &mut Vec<String>) -> Resu
                 return Ok(Value::List(xs));
             }
             trail.push(format!("[{n}]"));
-            let x = std::mem::replace(&mut xs[*n], Value::Null);
+            let x = core::mem::replace(&mut xs[*n], Value::Null);
             xs[*n] = apply_patch(x, rest, op, trail)?;
             trail.pop();
             Ok(Value::List(xs))
@@ -1536,7 +1547,7 @@ fn merge_patch(target: Value, patch: Value) -> Value {
             }
             (Value::Null, None) => {}
             (pv, Some(i)) => {
-                let old = std::mem::replace(&mut es[i].1, Value::Null);
+                let old = core::mem::replace(&mut es[i].1, Value::Null);
                 es[i].1 = merge_patch(old, pv);
             }
             (pv, None) => es.push((k, merge_patch(Value::Null, pv))),

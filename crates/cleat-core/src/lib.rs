@@ -1,4 +1,13 @@
 //! A typed configuration language whose values are JSON. See `SPEC.md`.
+//!
+//! This is the language itself: lexer, parser, checker, evaluator and output.
+//! It is `no_std` and does no I/O; imports are read through a [`Host`] that
+//! the application provides (see `host`), so it runs anywhere `alloc` does,
+//! including WebAssembly in a browser.
+
+#![no_std]
+
+extern crate alloc;
 
 pub mod ast;
 pub mod check;
@@ -6,36 +15,28 @@ pub mod complete;
 pub mod diag;
 pub mod emit;
 pub mod eval;
+pub mod host;
 pub mod json;
 pub mod lexer;
-pub mod lsp;
 pub mod modules;
 pub mod openapi;
 pub mod parser;
+pub mod prelude;
 pub mod targets;
 pub mod types;
 pub mod vc;
-pub mod yaml;
 
-use std::path::Path;
+use crate::prelude::*;
 
 pub use check::Outcome;
 pub use eval::{Component, EvalError, InputValue, Value};
+pub use host::{Host, MemHost, Session, Stamp};
 
-/// Parse and type-check a program; imports resolve relative to the current directory.
-pub fn check_source(src: &str) -> Outcome {
-    check_source_at(src, None)
-}
-
-/// Parse and type-check a program whose imports resolve relative to `base`.
-pub fn check_source_at(src: &str, base: Option<&Path>) -> Outcome {
-    check_source_in(src, base, None)
-}
-
-/// Like `check_source_at`, with every import required to stay inside `root`.
-pub fn check_source_in(src: &str, base: Option<&Path>, root: Option<&Path>) -> Outcome {
+/// Parse and type-check a program whose imports resolve relative to
+/// directory `base`, each required to stay inside `root` when there is one.
+pub fn check_source(sess: &Session, src: &str, base: Option<&str>, root: Option<&str>) -> Outcome {
     match parser::parse_program(src) {
-        Ok(items) => check::check_program_in(&items, base, root),
+        Ok(items) => check::check_program(sess, &items, base, root),
         Err(e) => Outcome {
             errors: vec![e],
             ..Default::default()
@@ -50,24 +51,12 @@ pub enum ExportError {
     Eval(Vec<EvalError>),
 }
 
-/// Check, then evaluate with the given inputs.
-pub fn export(src: &str, inputs: Vec<(String, InputValue)>) -> Result<(Outcome, Vec<Component>), ExportError> {
-    export_at(src, None, inputs)
-}
-
-pub fn export_at(
+/// Check, then evaluate with the given inputs (see `check_source` for `base` and `root`).
+pub fn export(
+    sess: &Session,
     src: &str,
-    base: Option<&Path>,
-    inputs: Vec<(String, InputValue)>,
-) -> Result<(Outcome, Vec<Component>), ExportError> {
-    export_in(src, base, None, inputs)
-}
-
-/// Like `export_at`, with every import required to stay inside `root`.
-pub fn export_in(
-    src: &str,
-    base: Option<&Path>,
-    root: Option<&Path>,
+    base: Option<&str>,
+    root: Option<&str>,
     inputs: Vec<(String, InputValue)>,
 ) -> Result<(Outcome, Vec<Component>), ExportError> {
     let items = match parser::parse_program(src) {
@@ -79,11 +68,11 @@ pub fn export_in(
             })));
         }
     };
-    let outcome = check::check_program_in(&items, base, root);
+    let outcome = check::check_program(sess, &items, base, root);
     if !outcome.errors.is_empty() {
         return Err(ExportError::Check(Box::new(outcome)));
     }
-    let comps = eval::run(&items, outcome.ctx.clone(), base, root, inputs).map_err(ExportError::Eval)?;
+    let comps = eval::run(sess, &items, outcome.ctx.clone(), base, root, inputs).map_err(ExportError::Eval)?;
     Ok((outcome, comps))
 }
 
@@ -103,20 +92,30 @@ pub struct InputInfo {
 }
 
 /// The program's inputs, or the check errors if it doesn't check.
-pub fn inputs(src: &str, base: Option<&Path>, root: Option<&Path>) -> Result<Vec<InputInfo>, Box<Outcome>> {
+pub fn inputs(
+    sess: &Session,
+    src: &str,
+    base: Option<&str>,
+    root: Option<&str>,
+) -> Result<Vec<InputInfo>, Box<Outcome>> {
     let items = parser::parse_program(src).map_err(|e| {
         Box::new(Outcome {
             errors: vec![e],
             ..Default::default()
         })
     })?;
-    let outcome = check::check_program_in(&items, base, root);
+    let outcome = check::check_program(sess, &items, base, root);
     if !outcome.errors.is_empty() {
         return Err(Box::new(outcome));
     }
+    Ok(input_infos(&items, &outcome))
+}
+
+/// The inputs declared by a checked program.
+pub fn input_infos(items: &[ast::Item], outcome: &Outcome) -> Vec<InputInfo> {
     let mut ctx = outcome.ctx.clone();
     let mut out = Vec::new();
-    for item in &items {
+    for item in items {
         let ast::Item::Input { name, ty, default, .. } = item else {
             continue;
         };
@@ -139,33 +138,13 @@ pub fn inputs(src: &str, base: Option<&Path>, root: Option<&Path>) -> Result<Vec
             required: default.is_none(),
         });
     }
-    Ok(out)
+    out
 }
 
-/// Inputs from a JSON or YAML file holding an object of input values.
-pub fn read_inputs_file(path: &Path) -> Result<Vec<(String, InputValue)>, String> {
-    let shown = path.display();
-    let text = std::fs::read_to_string(path).map_err(|e| format!("cannot read {shown}: {e}"))?;
-    let is_yaml = matches!(path.extension().and_then(|e| e.to_str()), Some("yaml" | "yml"));
-    let value = if is_yaml {
-        match yaml::parse_docs(&text).map_err(|e| format!("{shown}: {e}"))?.as_slice() {
-            [v] => v.clone(),
-            _ => return Err(format!("{shown}: expected exactly one YAML document")),
-        }
-    } else {
-        json::parse(&text).map_err(|e| format!("{shown}: {e}"))?
-    };
+/// Inputs from a parsed inputs file (an object of input values).
+pub fn inputs_from_value(value: Value) -> Result<Vec<(String, InputValue)>, String> {
     match value {
         Value::Obj(es) => Ok(es.into_iter().map(|(k, v)| (k, InputValue::Json(v))).collect()),
-        _ => Err(format!("{shown}: inputs must be an object")),
+        _ => Err("inputs must be an object".into()),
     }
-}
-
-/// The inputs file that goes with an entry file: `app.inputs.json` or `app.inputs.yaml` next to `app.cleat`.
-pub fn inputs_file_for(file: &Path) -> Option<std::path::PathBuf> {
-    let stem = file.file_stem()?.to_str()?;
-    ["json", "yaml", "yml"]
-        .iter()
-        .map(|ext| file.with_file_name(format!("{stem}.inputs.{ext}")))
-        .find(|p| p.exists())
 }

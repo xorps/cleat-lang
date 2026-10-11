@@ -1,6 +1,7 @@
 //! A small JSON parser for input values.
 
 use crate::eval::Value;
+use crate::prelude::*;
 
 pub fn parse(src: &str) -> Result<Value, String> {
     let mut p = P {
@@ -120,7 +121,7 @@ impl P<'_> {
             }
             self.i += 1;
         }
-        let text = std::str::from_utf8(&self.s[start..self.i]).unwrap();
+        let text = core::str::from_utf8(&self.s[start..self.i]).unwrap();
         if !float && let Ok(i) = text.parse::<i64>() {
             return Ok(Value::Int(i));
         }
@@ -178,7 +179,7 @@ impl P<'_> {
             .get(self.i..self.i + 4)
             .ok_or("invalid JSON: truncated \\u escape")?;
         self.i += 4;
-        u32::from_str_radix(std::str::from_utf8(h).unwrap_or(""), 16)
+        u32::from_str_radix(core::str::from_utf8(h).unwrap_or(""), 16)
             .map_err(|_| "invalid JSON: bad \\u escape".to_string())
     }
 }

@@ -1,6 +1,7 @@
 //! Serialization to JSON and YAML (SPEC §7 step 5).
 
 use crate::eval::Value;
+use crate::prelude::*;
 
 pub fn to_json(v: &Value, pretty: bool) -> String {
     let mut out = String::new();
@@ -56,7 +57,7 @@ fn write_json(v: &Value, pretty: bool, indent: usize, out: &mut String) {
 }
 
 fn float(f: f64) -> String {
-    if f.is_finite() && f.fract() == 0.0 && f.abs() < 1e16 {
+    if f.is_finite() && f.abs() < 1e16 && f == (f as i64) as f64 {
         format!("{f:.1}")
     } else {
         format!("{f}")
