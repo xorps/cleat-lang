@@ -4,22 +4,40 @@
 #   deploy/argocd/e2e/run.sh            # create cluster, install, sync, verify
 #   deploy/argocd/e2e/run.sh cleanup    # delete the cluster
 #
-# Needs docker and kubectl. Downloads kind if it isn't on PATH.
+# Needs docker and kubectl. Downloads a pinned kind (checksum-verified) and
+# installs a pinned Argo CD release (manifest checksum-verified).
 set -eu
 cd "$(dirname "$0")/../../.."
 CLUSTER=cleat-e2e
 CTX=kind-$CLUSTER
 k() { kubectl --context "$CTX" "$@"; }
 
-KIND=$(command -v kind || true)
-if [ -z "$KIND" ]; then
-  KIND=${TMPDIR:-/tmp}/kind-cleat
-  if [ ! -x "$KIND" ]; then
-    os=$(uname -s | tr '[:upper:]' '[:lower:]')
-    arch=$(uname -m | sed 's/x86_64/amd64/; s/aarch64/arm64/')
-    curl -sSfLo "$KIND" "https://kind.sigs.k8s.io/dl/v0.29.0/kind-$os-$arch"
-    chmod +x "$KIND"
-  fi
+# Pinned tools, verified by checksum before use.
+KIND_VERSION=v0.33.0
+ARGOCD_VERSION=v3.5.4
+ARGOCD_COMMIT=d6d5b248ce00e1a2c512068002a93d3319767087 # the $ARGOCD_VERSION tag
+ARGOCD_INSTALL_SHA256=1feb02cc7bacf3a379da58b0ca8c6f07d18288cd04d531dabd08816375e5e010
+
+sha256() { if command -v sha256sum >/dev/null; then sha256sum "$1"; else shasum -a 256 "$1"; fi | cut -d' ' -f1; }
+verify() { # file expected-sha256
+  got=$(sha256 "$1")
+  [ "$got" = "$2" ] || { echo "checksum mismatch for $1: got $got, want $2" >&2; exit 1; }
+}
+
+os=$(uname -s | tr '[:upper:]' '[:lower:]')
+arch=$(uname -m | sed 's/x86_64/amd64/; s/aarch64/arm64/')
+case "$os-$arch" in
+  linux-amd64) KIND_SHA256=aee6151561422756b764a4ae28e7f44cda5af5a9eead3cc9985112b1de8d8e0d ;;
+  linux-arm64) KIND_SHA256=20022bee6cfcd5086cb7234d218e3454e6090022f2a8f55d1fa7fcf42c3867a2 ;;
+  darwin-amd64) KIND_SHA256=5a99f26f57246dc9319dd294803313197a0f34d33c525b3ea8b655db5916ece0 ;;
+  darwin-arm64) KIND_SHA256=0c8c7dbe5e23594a198b786c4bc13dacc101fa6196b0cb0b23a1ca44e61f4b4f ;;
+  *) echo "unsupported platform $os-$arch" >&2; exit 1 ;;
+esac
+KIND=${TMPDIR:-/tmp}/kind-$KIND_VERSION-$os-$arch
+if [ ! -x "$KIND" ]; then
+  curl -sSfLo "$KIND.download" "https://github.com/kubernetes-sigs/kind/releases/download/$KIND_VERSION/kind-$os-$arch"
+  verify "$KIND.download" "$KIND_SHA256"
+  chmod +x "$KIND.download" && mv "$KIND.download" "$KIND"
 fi
 
 if [ "${1:-}" = cleanup ]; then
@@ -30,9 +48,12 @@ fi
 echo "==> cluster"
 "$KIND" get clusters | grep -qx "$CLUSTER" || "$KIND" create cluster --name "$CLUSTER" --wait 120s
 
-echo "==> Argo CD"
+echo "==> Argo CD $ARGOCD_VERSION"
 k get namespace argocd >/dev/null 2>&1 || k create namespace argocd
-k apply -n argocd --server-side -f https://raw.githubusercontent.com/argoproj/argo-cd/stable/manifests/install.yaml >/dev/null
+install=${TMPDIR:-/tmp}/argocd-install-$ARGOCD_VERSION.yaml
+curl -sSfLo "$install" "https://raw.githubusercontent.com/argoproj/argo-cd/$ARGOCD_COMMIT/manifests/install.yaml"
+verify "$install" "$ARGOCD_INSTALL_SHA256"
+k apply -n argocd --server-side -f "$install" >/dev/null
 k -n argocd rollout status deploy/argocd-repo-server --timeout=300s
 
 echo "==> images"

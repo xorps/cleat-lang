@@ -1,5 +1,5 @@
 # A git daemon serving the e2e app repository at git://git-server.argocd.svc/app.git
-FROM alpine:3.20
+FROM alpine:3.23@sha256:85fe1e81d6758c208f3e1eed4338a1997e19d4be002d4dd32d3100c9a8c010a0
 RUN apk add --no-cache git git-daemon
 COPY repo /srv/src
 RUN git config --global user.email e2e@example.com && git config --global user.name e2e \
