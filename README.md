@@ -19,7 +19,10 @@ cargo test
 ## Kubernetes and CRD types
 
 Import the Kubernetes OpenAPI spec and your CRDs; `apiVersion` and `kind`
-fill themselves in, and descriptions show on hover:
+fill themselves in, descriptions show on hover, and enum fields the spec
+leaves as plain strings (`Service.spec.type`, `imagePullPolicy`,
+`restartPolicy`, protocols, access modes, ...) are checked against their
+allowed values:
 
 ```ts
 import * as k8s from "../schemas/kubernetes-1.31.json"

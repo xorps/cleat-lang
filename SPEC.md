@@ -175,6 +175,7 @@ Schemas are converted to Cleat types (`cleat gen <file>` prints the result):
 | `nullable: true` | `T \| null` |
 | `x-kubernetes-group-version-kind` | `apiVersion`/`kind` become required literal fields, so they fill themselves in |
 | Kubernetes `resource.Quantity` | `Str \| Float` (accepts `cpu: 1` and `cpu: "500m"`) |
+| Kubernetes enum fields typed as plain strings | literal unions, from a curated table (`KUBERNETES_ENUMS` in `src/openapi.rs`): `Service.spec.type`, `imagePullPolicy`, `restartPolicy`, protocols, access modes, update strategies, operators and about 30 more. Each list is the one in the field's own description, and only long-stable enums are included, since `with` can't widen a stale list. |
 
 **Names.** OpenAPI definitions keep their group and version:
 `io.k8s.api.apps.v1.Deployment` becomes `apps.v1.Deployment`. A short name
@@ -188,9 +189,8 @@ hover.
 
 ### 4.2 Refining types: `with` and `refine`
 
-Imported schemas are often looser than you want: the Kubernetes OpenAPI
-spec, for instance, types `Service.spec.type` as any `Str`. `T with { ... }`
-makes a narrower copy of a record type:
+Imported schemas describe what an API accepts, which is often looser than a
+project's policy. `T with { ... }` makes a narrower copy of a record type:
 
 ```ts
 type SmallDeployment = k8s.Deployment with {
@@ -214,8 +214,8 @@ in the file, including those inside other imported types, sees the
 narrowed version.
 
 ```ts
-refine k8s.ServiceSpec with { type: "ClusterIP" | "NodePort" | "LoadBalancer" | "ExternalName" }
-let s = k8s.Service { spec.type: "Cluster" }   // error: expected one of the four
+refine k8s.ServiceSpec with { type: "ClusterIP" | "LoadBalancer" }   // project policy
+let s = k8s.Service { spec.type: "NodePort" }   // error: expected `"ClusterIP" | "LoadBalancer"`
 ```
 
 `refine` on a short name refines the definition it points to
@@ -434,16 +434,14 @@ dependencies reach the cluster:
 ## 11. Open questions
 
 - Totality: keep the no-recursion rule, or allow recursion with a fuel limit?
-- Should field order in the output follow the schema or the source?
 - Strategic-merge semantics for `with` on keyed lists without an explicit
   selector.
 - Defaults inside `type` declarations are checked with no variables in scope,
   so they can't refer to inputs or `let`s. Is that the right rule?
 - Should components be able to set an explicit wave offset, or Flux options
   like `timeout`, per component?
-- The Kubernetes OpenAPI specs (v2 and v3) don't mark enum fields such as
-  `ServiceSpec.type`. `refine` (§4.2) covers this per project; should Cleat
-  also ship a curated set of refinements for the core API? That needs
-  modules that can contain `refine`.
+- The curated Kubernetes enum table (§4.1) must track new Kubernetes
+  releases. Should it instead be derived from field descriptions
+  ("Valid options are ...") when a schema is imported?
 - Recursive types: should aliases be allowed to be recursive, so schemas
   like `JSONSchemaProps` keep their full structure instead of `Json`?

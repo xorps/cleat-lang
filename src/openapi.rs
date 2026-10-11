@@ -457,6 +457,87 @@ fn with_gvk(s: &Value, api: &str, kind: &str) -> Value {
     s
 }
 
+/// Enum fields the Kubernetes OpenAPI spec types as plain strings, although the
+/// API only accepts these values (each list is the one given in the field's own
+/// description). `[]` marks the elements of a list. Only long-stable enums are
+/// listed: a value missing here would reject valid manifests, and `with` can't widen.
+pub const KUBERNETES_ENUMS: &[(&str, &str, &[&str])] = &[
+    ("core.v1.ServiceSpec", "type", &["ClusterIP", "NodePort", "LoadBalancer", "ExternalName"]),
+    ("core.v1.ServiceSpec", "sessionAffinity", &["ClientIP", "None"]),
+    ("core.v1.ServiceSpec", "externalTrafficPolicy", &["Cluster", "Local"]),
+    ("core.v1.ServiceSpec", "internalTrafficPolicy", &["Cluster", "Local"]),
+    ("core.v1.ServiceSpec", "ipFamilyPolicy", &["SingleStack", "PreferDualStack", "RequireDualStack"]),
+    ("core.v1.ServiceSpec", "ipFamilies[]", &["IPv4", "IPv6"]),
+    ("core.v1.ServicePort", "protocol", &["TCP", "UDP", "SCTP"]),
+    ("core.v1.ContainerPort", "protocol", &["TCP", "UDP", "SCTP"]),
+    ("core.v1.Container", "imagePullPolicy", &["Always", "IfNotPresent", "Never"]),
+    ("core.v1.Container", "terminationMessagePolicy", &["File", "FallbackToLogsOnError"]),
+    ("core.v1.EphemeralContainer", "imagePullPolicy", &["Always", "IfNotPresent", "Never"]),
+    ("core.v1.PodSpec", "restartPolicy", &["Always", "OnFailure", "Never"]),
+    ("core.v1.PodSpec", "dnsPolicy", &["ClusterFirstWithHostNet", "ClusterFirst", "Default", "None"]),
+    ("core.v1.PodSpec", "preemptionPolicy", &["PreemptLowerPriority", "Never"]),
+    ("core.v1.Toleration", "operator", &["Exists", "Equal"]),
+    ("core.v1.Toleration", "effect", &["", "NoSchedule", "PreferNoSchedule", "NoExecute"]),
+    ("core.v1.Taint", "effect", &["NoSchedule", "PreferNoSchedule", "NoExecute"]),
+    ("core.v1.NodeSelectorRequirement", "operator", &["In", "NotIn", "Exists", "DoesNotExist", "Gt", "Lt"]),
+    ("meta.v1.LabelSelectorRequirement", "operator", &["In", "NotIn", "Exists", "DoesNotExist"]),
+    ("core.v1.TopologySpreadConstraint", "whenUnsatisfiable", &["DoNotSchedule", "ScheduleAnyway"]),
+    ("core.v1.TopologySpreadConstraint", "nodeAffinityPolicy", &["Honor", "Ignore"]),
+    ("core.v1.TopologySpreadConstraint", "nodeTaintsPolicy", &["Honor", "Ignore"]),
+    ("core.v1.PersistentVolumeClaimSpec", "accessModes[]", &["ReadWriteOnce", "ReadOnlyMany", "ReadWriteMany", "ReadWriteOncePod"]),
+    ("core.v1.PersistentVolumeClaimSpec", "volumeMode", &["Filesystem", "Block"]),
+    ("core.v1.PodSecurityContext", "fsGroupChangePolicy", &["OnRootMismatch", "Always"]),
+    ("core.v1.SeccompProfile", "type", &["Localhost", "RuntimeDefault", "Unconfined"]),
+    ("core.v1.HTTPGetAction", "scheme", &["HTTP", "HTTPS"]),
+    ("apps.v1.DeploymentStrategy", "type", &["Recreate", "RollingUpdate"]),
+    ("apps.v1.StatefulSetSpec", "podManagementPolicy", &["OrderedReady", "Parallel"]),
+    ("apps.v1.StatefulSetUpdateStrategy", "type", &["OnDelete", "RollingUpdate"]),
+    ("apps.v1.DaemonSetUpdateStrategy", "type", &["OnDelete", "RollingUpdate"]),
+    ("batch.v1.JobSpec", "completionMode", &["NonIndexed", "Indexed"]),
+    ("batch.v1.JobSpec", "podReplacementPolicy", &["TerminatingOrFailed", "Failed"]),
+    ("batch.v1.CronJobSpec", "concurrencyPolicy", &["Allow", "Forbid", "Replace"]),
+    ("networking.v1.HTTPIngressPath", "pathType", &["Exact", "Prefix", "ImplementationSpecific"]),
+    ("networking.v1.NetworkPolicySpec", "policyTypes[]", &["Ingress", "Egress"]),
+    ("networking.v1.NetworkPolicyPort", "protocol", &["TCP", "UDP", "SCTP"]),
+    ("autoscaling.v2.MetricSpec", "type", &["ContainerResource", "External", "Object", "Pods", "Resource"]),
+    ("autoscaling.v2.MetricTarget", "type", &["AverageValue", "Utilization", "Value"]),
+    ("policy.v1.PodDisruptionBudgetSpec", "unhealthyPodEvictionPolicy", &["IfHealthyBudget", "AlwaysAllow"]),
+];
+
+/// Add `enum` to the curated Kubernetes fields of definition `local` (e.g. `core.v1.ServiceSpec`).
+/// Returns how many fields were changed.
+fn apply_kubernetes_enums(local: &str, s: &mut Value) -> usize {
+    let mut n = 0;
+    for (_, field, values) in KUBERNETES_ENUMS.iter().filter(|(d, _, _)| *d == local) {
+        let (name, list) = match field.strip_suffix("[]") {
+            Some(f) => (f, true),
+            None => (*field, false),
+        };
+        let Value::Obj(es) = s else { continue };
+        let Some((_, Value::Obj(props))) = es.iter_mut().find(|(k, _)| k == "properties") else { continue };
+        let Some((_, prop)) = props.iter_mut().find(|(k, _)| k == name) else { continue };
+        let target = if list {
+            match prop {
+                Value::Obj(p) => match p.iter_mut().find(|(k, _)| k == "items") {
+                    Some((_, items)) => items,
+                    None => continue,
+                },
+                _ => continue,
+            }
+        } else {
+            prop
+        };
+        if let Value::Obj(t) = target {
+            if str_of(t.iter().find(|(k, _)| k == "type").map(|(_, v)| v)) == Some("string") {
+                t.retain(|(k, _)| k != "enum");
+                t.push(("enum".into(), Value::List(values.iter().map(|v| Value::Str(v.to_string())).collect())));
+                n += 1;
+            }
+        }
+    }
+    n
+}
+
 fn from_openapi(doc: &Value) -> Result<Generated, String> {
     let (defs_v, prefix) = match (doc.get("definitions"), doc.get("components").and_then(|c| c.get("schemas"))) {
         (Some(d), _) => (d, "#/definitions/"),
@@ -473,9 +554,18 @@ fn from_openapi(doc: &Value) -> Result<Generated, String> {
         g.names.insert(k.clone(), name);
     }
 
+    let kubernetes = str_of(doc.get("info").and_then(|i| i.get("title"))) == Some("Kubernetes");
     for (k, s) in &defs {
         g.cur_def = k.clone();
         let name = g.names[k].clone();
+        let mut owned;
+        let s = if kubernetes && KUBERNETES_ENUMS.iter().any(|(d, _, _)| *d == name) {
+            owned = (*s).clone();
+            apply_kubernetes_enums(&name, &mut owned);
+            &owned
+        } else {
+            *s
+        };
         let body = if k.ends_with("api.resource.Quantity") {
             "Str | Float".to_string() // Kubernetes accepts `cpu: 1` as well as `cpu: "500m"`
         } else if let Some((api, kind)) = gvk(s) {
@@ -590,4 +680,15 @@ fn from_crds(crds: &[&Value]) -> Result<Generated, String> {
         g.emit(short, target, None);
     }
     Ok(g.finish("Types from CustomResourceDefinitions"))
+}
+
+/// How many of `KUBERNETES_ENUMS` apply to a schema (for tests: a renamed field shows up here).
+pub fn kubernetes_enums_applied(doc: &Value) -> usize {
+    let Some(Value::Obj(defs)) = doc.get("definitions") else { return 0 };
+    defs.iter()
+        .map(|(k, s)| {
+            let mut s = s.clone();
+            apply_kubernetes_enums(&local_name(k), &mut s)
+        })
+        .sum()
 }

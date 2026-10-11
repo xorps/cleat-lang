@@ -4,7 +4,8 @@
 
 import * as k8s from "../../schemas/kubernetes-1.31.json"
 
-refine k8s.ServiceSpec with { type: "ClusterIP" | "NodePort" | "LoadBalancer" | "ExternalName" }
+// Project policy: no NodePort or ExternalName Services.
+refine k8s.ServiceSpec with { type: "ClusterIP" | "LoadBalancer" }
 
 type DnsLabel = Str where len(self) <= 63 && matches(self, "^[a-z0-9]([-a-z0-9]*[a-z0-9])?$")
 type Port     = Int where 1 <= self && self <= 65535
