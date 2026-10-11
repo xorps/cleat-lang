@@ -54,6 +54,18 @@
       return {
         i, doc, kind, ns, name, yaml: r.yaml, component: r.component, wave: r.wave,
         key: `${kind}/${ns}/${name}`, out: [], in: [], notes: [], missing: [],
+        change: r.change, diff: r.diff,
+      };
+    });
+    // With --diff: resources the base revision has and the working tree doesn't.
+    const removed = list(get(state, "base", "removed")).map((r) => {
+      const doc = r.doc && typeof r.doc === "object" ? r.doc : {};
+      const kind = doc.kind || "(no kind)";
+      const ns = CLUSTER_SCOPED.has(kind) ? "" : get(doc, "metadata", "namespace") || "";
+      const name = get(doc, "metadata", "name") || "?";
+      return {
+        doc, kind, ns, name, yaml: r.yaml, component: r.component, wave: r.wave,
+        key: `${kind}/${ns}/${name}`, out: [], in: [], notes: [], missing: [], change: "removed", removed: true,
       };
     });
     const problems = [];
@@ -217,12 +229,20 @@
         }
       }
     }
-    return { res, problems };
+    return { res, problems, removed, base: state.base || null };
   }
 
   // ---------- formatting ----------
 
   const chip = (s, cls = "") => `<span class="chip ${cls}">${esc(s)}</span>`;
+  const CHANGE_LABEL = { added: "new", changed: "changed", removed: "removed" };
+  const changeChip = (r) => (r.change && CHANGE_LABEL[r.change] ? ` <span class="chg ${r.change}">${CHANGE_LABEL[r.change]}</span>` : "");
+  const diffHtml = (d) =>
+    esc(d)
+      .split("\n")
+      .map((l) => (l.startsWith("+") ? `<span class="d-add">${l}</span>` : l.startsWith("-") ? `<span class="d-del">${l}</span>` : l.startsWith("@@") ? `<span class="d-hunk">${l}</span>` : l))
+      .join("\n");
+  const findAny = (key) => model.res.find((x) => x.key === key) || model.removed.find((x) => x.key === key);
   const resLink = (r) => `<a class="res" href="${hrefFor({ sel: r.key })}">${chip(r.kind, "kind")} <span class="rn">${esc(r.name)}</span></a>`;
   const images = (r) => [...new Set(containersOf(get(podTemplate(r.doc), "spec")).map((c) => c.image || "(no image)"))].map((i) => chip(i)).join(" ");
   const cports = (r) => containersOf(get(podTemplate(r.doc), "spec")).flatMap((c) => list(c.ports).map((p) => chip(`${p.name ? p.name + ":" : ""}${p.containerPort}/${p.protocol || "TCP"}`))).join(" ") || '<span class="muted">—</span>';
@@ -279,7 +299,7 @@
 
   // ---------- view state ----------
 
-  let model = { res: [], problems: [] };
+  let model = { res: [], problems: [], removed: [], base: null };
   let data = null;
   let route = { view: "overview", sel: null };
 
@@ -295,10 +315,12 @@
     return "#" + p.toString();
   }
 
-  function visible() {
+  function visible(withRemoved) {
     const ns = $("ns").value;
     const q = $("search").value.trim().toLowerCase();
-    return model.res.filter((r) => {
+    const changesOnly = model.base && $("changes-only").checked;
+    return [...model.res, ...(withRemoved ? model.removed : [])].filter((r) => {
+      if (changesOnly && !(r.change && r.change !== "same")) return false;
       if (ns !== "*" && r.ns !== ns) return false;
       if (!q) return true;
       const hay = [r.name, r.kind, r.component, ...entries(get(r.doc, "metadata", "labels")).map(([k, v]) => `${k}=${v}`)].join(" ").toLowerCase();
@@ -346,12 +368,32 @@
   }
   const md = (s) => esc(s).replace(/`([^`]+)`/g, "<code>$1</code>");
 
+  function changesHtml() {
+    const b = model.base;
+    if (!b) return "";
+    if (list(b.errors).length) {
+      return `<div class="changes bad"><strong>Can't compare with ${esc(b.label)}:</strong> it doesn't check there.<ul>${list(b.errors)
+        .map((e) => `<li>${e.line ? `${e.line}:${e.col}: ` : ""}${esc(e.msg)}</li>`)
+        .join("")}</ul></div>`;
+    }
+    const all = [...model.res, ...model.removed].filter((r) => r.change && r.change !== "same");
+    const n = (c) => all.filter((r) => r.change === c).length;
+    const lead = b.missing ? `<p class="muted">This file doesn't exist at ${esc(b.label)}, so everything is new.</p>` : "";
+    if (!all.length) return `<div class="changes"><strong>No changes</strong> compared with ${esc(b.label)}.</div>`;
+    const order = { removed: 0, changed: 1, added: 2 };
+    return `<div class="changes"><strong>Changes compared with ${esc(b.label)}:</strong> ${n("added")} new, ${n("changed")} changed, ${n("removed")} removed${lead}
+      <ul>${all
+        .sort((a, c) => order[a.change] - order[c.change])
+        .map((r) => `<li><span class="chg ${r.change}">${CHANGE_LABEL[r.change]}</span> ${resLink(r)}</li>`)
+        .join("")}</ul></div>`;
+  }
+
   function renderOverview(rs) {
     const namespaces = new Set(rs.map((r) => r.ns || "—"));
     const byKind = new Map();
     for (const r of rs) byKind.set(r.kind, (byKind.get(r.kind) || 0) + 1);
     const warnCount = model.problems.filter((p) => p.level === "warn").length;
-    let html = `<h1>Overview</h1><div class="cards">
+    let html = `<h1>Overview</h1>${changesHtml()}<div class="cards">
       <div class="card"><div class="n">${rs.length}</div><div class="l">resources</div></div>
       <div class="card"><div class="n">${byKind.size}</div><div class="l">kinds</div></div>
       <div class="card"><div class="n">${namespaces.size}</div><div class="l">namespace${namespaces.size === 1 ? "" : "s"}</div></div>
@@ -393,8 +435,8 @@
     const rows = rs
       .map((r) => {
         const flags = r.notes.filter((n) => n.level === "warn").length;
-        return `<tr data-key="${esc(r.key)}"${route.sel === r.key ? ' aria-selected="true"' : ""}>
-        <td class="name">${esc(r.name)}${flags ? ` <span class="flag warn">${flags} warning${flags > 1 ? "s" : ""}</span>` : ""}</td>
+        return `<tr data-key="${esc(r.key)}"${route.sel === r.key ? ' aria-selected="true"' : ""}${r.removed ? ' class="removed"' : ""}>
+        <td class="name"><span class="rn">${esc(r.name)}</span>${changeChip(r)}${flags ? ` <span class="flag warn">${flags} warning${flags > 1 ? "s" : ""}</span>` : ""}</td>
         ${showNs ? `<td>${esc(r.ns || "—")}</td>` : ""}
         ${cols.map((c) => `<td>${c[1](r)}</td>`).join("")}
         <td>${esc(r.component)}<span class="sub">wave ${esc(r.wave)}</span></td></tr>`;
@@ -430,7 +472,7 @@
   }
 
   function renderDetail() {
-    const r = model.res.find((x) => x.key === route.sel);
+    const r = findAny(route.sel);
     const el = $("detail");
     if (!r) {
       el.hidden = true;
@@ -448,6 +490,12 @@
       <a class="close" href="${hrefFor({ sel: null })}" aria-label="Close">×</a></div>
       <dl class="kv" style="margin-top:12px">${kv.map(([k, v]) => `<dt>${esc(k)}</dt><dd>${v}</dd>`).join("")}</dl>`;
 
+    if (r.removed) {
+      html += `<div class="changes bad" style="margin-top:14px">Removed: this is in ${esc(model.base.label)} but not in the working tree. The YAML below is from ${esc(model.base.label)}.</div>`;
+    } else if (r.change === "added" && model.base) {
+      html += `<div class="changes added" style="margin-top:14px">New: not in ${esc(model.base.label)}.</div>`;
+    }
+    if (r.diff) html += `<h2>Changes compared with ${esc(model.base.label)}</h2><pre class="yaml diff">${diffHtml(r.diff)}</pre>`;
     if (r.notes.length) html += `<h2>Checks</h2>${problemsHtml(r.notes.map((n) => ({ ...n, r: null })))}`;
 
     const tpl = podTemplate(d);
@@ -626,7 +674,8 @@
       .map((n) => {
         const r = n.r;
         const warn = r ? r.notes.filter((x) => x.level === "warn").length : 0;
-        const cls = ["node", CAT_CLASS[categoryOf(n.kind)] || "c-custom", n.ghost ? `ghost ${n.ghost}` : "", route.sel === n.key ? "sel" : "", warn ? "has-warn" : ""].join(" ");
+        const chg = r && r.change && r.change !== "same" ? r.change : "";
+        const cls = ["node", CAT_CLASS[categoryOf(n.kind)] || "c-custom", n.ghost ? `ghost ${n.ghost}` : "", route.sel === n.key ? "sel" : "", warn ? "has-warn" : "", chg ? `diff-${chg}` : ""].join(" ");
         const abbr = ABBR[n.kind] || n.kind.slice(0, 6).toLowerCase();
         const sub = n.ghost ? `${n.kind} · not in this output` : `${n.kind} · ${nodeInfo(r)}`;
 
@@ -636,10 +685,11 @@
           <rect class="stripe" width="5" height="${NODE_H}" rx="2"/>
           <circle class="badge" cx="30" cy="${NODE_H / 2}" r="17"/>
           <text class="abbr" x="30" y="${NODE_H / 2 + 4}" text-anchor="middle">${esc(abbr)}</text>
-          <text class="nm" x="56" y="23" data-max="${NODE_W - 56 - (warn ? 26 : 10)}">${esc(n.name)}</text>
+          <text class="nm" x="56" y="23" data-max="${NODE_W - 56 - (warn ? 26 : 10) - (chg ? 52 : 0)}">${esc(n.name)}</text>
           <text class="sub" x="56" y="41" data-max="${NODE_W - 56 - (r ? 30 : 10)}">${esc(sub)}</text>
           ${warn ? `<g class="warnb"><circle cx="${NODE_W - 12}" cy="12" r="8"/><text x="${NODE_W - 12}" y="16" text-anchor="middle">!</text></g>` : ""}
           ${r ? `<text class="wave" x="${NODE_W - 10}" y="${NODE_H - 9}" text-anchor="end">w${esc(r.wave)}</text>` : ""}
+          ${chg ? `<g class="chgb"><rect x="${NODE_W - (warn ? 70 : 52)}" y="4" width="${chg === "changed" ? 50 : chg === "removed" ? 50 : 30}" height="15" rx="7.5"/><text x="${NODE_W - (warn ? 70 : 52) + (chg === "added" ? 15 : 25)}" y="15" text-anchor="middle">${CHANGE_LABEL[chg]}</text></g>` : ""}
         </g>`;
       })
       .join("");
@@ -714,11 +764,11 @@
     renderNav(rs);
     let html;
     if (route.view === "overview") html = renderOverview(rs);
-    else if (route.view === "map") html = renderMap(rs);
-    else if (route.view === "all") html = renderTable(rs, "All resources");
+    else if (route.view === "map") html = renderMap(visible(true));
+    else if (route.view === "all") html = renderTable(visible(true), "All resources");
     else {
       const kind = route.view.slice(5);
-      html = renderTable(rs.filter((r) => r.kind === kind), kind);
+      html = renderTable(visible(true).filter((r) => r.kind === kind), kind);
     }
     $("main").innerHTML = html;
     if (route.view === "map") wireMap();
@@ -769,6 +819,17 @@
       : "Values are decoded by each input's type, as with --set. Leave one empty to use its default.";
   }
 
+  function renderDiffSummary() {
+    const b = model.base;
+    $("diff-controls").hidden = !b;
+    if (!b) return;
+    const all = [...model.res, ...model.removed];
+    const n = (c) => all.filter((r) => r.change === c).length;
+    $("diffsum").innerHTML = list(b.errors).length
+      ? `vs ${esc(b.label)}: <span class="chg removed">can't compare</span>`
+      : `vs ${esc(b.label)}: <span class="chg added">+${n("added")}</span> <span class="chg changed">~${n("changed")}</span> <span class="chg removed">−${n("removed")}</span>`;
+  }
+
   function apply(next) {
     data = next;
     $("file").textContent = next.file || "";
@@ -786,6 +847,7 @@
     } else {
       banner.hidden = true;
       model = build(next);
+      renderDiffSummary();
       const warnings = list(next.warnings).length;
       $("status").className = "status ok";
       $("status").textContent = snapshot || embedded
@@ -823,6 +885,7 @@
     $("inputs-toggle").setAttribute("aria-expanded", String(!panel.hidden));
   };
   $("ns").onchange = render;
+  $("changes-only").onchange = render;
   $("search").oninput = render;
   addEventListener("hashchange", render);
   addEventListener("keydown", (e) => {

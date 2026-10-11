@@ -16,6 +16,7 @@ fn app(name: &str, src: &str) -> ViewConfig {
         root: Some(dir),
         inputs: vec![("env".into(), InputValue::Raw("prod".into()))],
         target: "argocd".into(),
+        diff: None,
     }
 }
 
@@ -96,9 +97,9 @@ fn snapshots_embed_the_state_safely() {
 
 #[test]
 fn the_server_answers_only_for_its_own_host() {
-    let cfg = app("serve", SRC);
     let (tx, rx) = std::sync::mpsc::channel();
-    std::thread::spawn(move || serve(&cfg, 0, |url| tx.send(url.to_string()).unwrap()).unwrap());
+    // A config isn't Send (it can hold a git session), so make it on the server's thread.
+    std::thread::spawn(move || serve(&app("serve", SRC), 0, |url| tx.send(url.to_string()).unwrap()).unwrap());
     let url = rx.recv().unwrap();
     let addr = url.trim_start_matches("http://").trim_end_matches('/').to_string();
     let request = |host: &str, req: &str| {

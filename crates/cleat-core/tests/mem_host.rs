@@ -94,3 +94,23 @@ fn regexes_work_without_std() {
     assert_eq!(emit::to_yaml(&comps[0].docs[0]), "a: true\nb: false\n");
     assert!(errors(&sess, "export { a: matches(\"x\", \"(\") }")[0].contains("invalid regex"));
 }
+
+#[test]
+fn unified_diffs_of_rendered_documents() {
+    use cleat_core::diff::unified;
+    assert_eq!(unified("a\nb\n", "a\nb\n", 3), "");
+    let old = "kind: Deployment\nspec:\n  replicas: 1\n  paused: false\nmetadata:\n  name: api\n";
+    let new =
+        "kind: Deployment\nspec:\n  replicas: 3\n  paused: false\nmetadata:\n  name: api\n  labels:\n    tier: web\n";
+    // Three unchanged lines apart, more than twice the context: two hunks, as `diff -U1` gives.
+    assert_eq!(
+        unified(old, new, 1),
+        "@@ -2,3 +2,3 @@\n spec:\n-  replicas: 1\n+  replicas: 3\n   paused: false\n\
+         @@ -6,1 +6,3 @@\n   name: api\n+  labels:\n+    tier: web\n"
+    );
+    assert!(unified(old, new, 3).starts_with("@@ -1,6 +1,8 @@\n kind: Deployment\n"));
+    // Far-apart changes become separate hunks.
+    let a: String = (0..20).map(|i| format!("l{i}\n")).collect();
+    let b = a.replace("l2\n", "x\n").replace("l17\n", "y\n");
+    assert_eq!(unified(&a, &b, 1).matches("@@ -").count(), 2);
+}

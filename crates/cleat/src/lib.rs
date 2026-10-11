@@ -5,7 +5,9 @@
 //! The functions here use a session per thread, so caches of loaded and
 //! checked modules last across calls (the language server relies on that).
 
+pub mod compare;
 pub mod fs;
+pub mod git;
 pub mod lsp;
 pub mod view;
 pub mod yaml;

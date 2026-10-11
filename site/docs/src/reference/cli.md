@@ -5,6 +5,7 @@ usage:
   cleat check  <file.cleat> [--vcs]
   cleat export <file.cleat> [options]
   cleat view   <file.cleat>  the exported resources in a browser, live
+  cleat diff   <file.cleat>  what the output changes compared with a git revision
   cleat gen <schema>         print Cleat types for an OpenAPI document or CRD file
   cleat lsp                  language server on stdio (used by editors)
   cleat argocd generate      Argo CD plugin: export $ARGOCD_ENV_CLEAT_FILE (default main.cleat)
@@ -31,6 +32,11 @@ view options (also: --input, --set, --target plain|argocd):
   --port <n>               port on 127.0.0.1 (default: any free port)
   --no-open                don't open a browser
   --out <file.html>        write a self-contained snapshot instead of serving
+  --diff <rev>             mark what changed compared with a git revision (branch, tag, commit)
+
+diff options (also: --input, --set, --target plain|argocd):
+  --base <rev>             the git revision to compare with (required)
+  --exit-code              exit with status 1 when anything changed
 ```
 
 ## `cleat check`
@@ -91,6 +97,43 @@ The page updates within a second when the file, or anything it imports,
 changes. Inputs start from `--set` and `--input` and can be edited on the
 page. The server listens on 127.0.0.1 only. With `--out view.html` it writes
 a self-contained snapshot instead, to attach to a pull request or a ticket.
+
+## `cleat diff`
+
+Compares the output with the same program at a git revision (a branch, tag
+or commit), with the same inputs:
+
+```console
+$ cleat diff app.cleat --base main --set image=ghcr.io/acme/api:1.5.0
+Comparing app.cleat with main (4dec382d89):
+  ~ Deployment api
+  + Service metrics
+  - ConfigMap old-config
+1 added, 1 changed, 1 removed (1 unchanged)
+
+~ Deployment api
+@@ -3,7 +3,7 @@
+ metadata:
+   name: api
+ spec:
+-  replicas: 1
++  replicas: 3
+   selector:
+     matchLabels:
+       app: api
+```
+
+Resources are matched by kind, namespace and name. Every file the program
+reads at the revision comes from that revision, including imported modules;
+files git ignores (such as downloaded schemas) aren't in any revision, so
+they're read from the working tree. Inputs that only the working tree
+declares are left out for the revision. With `--exit-code`, it exits with
+status 1 when anything changed, for CI.
+
+`cleat view app.cleat --diff main` shows the same comparison in the
+dashboard: new, changed and removed resources are marked in the tables and
+on the map, the overview lists them, "Changes only" hides the rest, and a
+changed resource's details show its diff.
 
 ## `cleat gen`
 

@@ -258,3 +258,35 @@ body.embed .main { padding: 12px 14px 24px; }
 body.embed .top { padding: 4px 8px; border-bottom: 0; justify-content: flex-end; }
 body.embed .top .spacer { display: none; }
 body.embed #search { width: 180px; padding: 2px 8px; font-size: 13px; }
+
+/* ---------- changes (--diff) ---------- */
+:root { --add: #1a7f37; --add-bg: #e6f6ea; --chg: #a86f00; --chg-bg: #fff6e0; --del: #c93434; --del-bg: #fdecec; }
+@media (prefers-color-scheme: dark) {
+  :root { --add: #56d364; --add-bg: #12301b; --chg: #f0b429; --chg-bg: #3a2e10; --del: #ff7373; --del-bg: #3a1a1f; }
+}
+.diff-controls { display: inline-flex; align-items: center; gap: 10px; font-size: 13px; color: var(--muted); }
+.diff-controls label { display: inline-flex; align-items: center; gap: 4px; cursor: pointer; }
+.chg { display: inline-block; font-size: 11.5px; font-weight: 600; padding: 0 7px; border-radius: 999px; white-space: nowrap; }
+.chg.added { background: var(--add-bg); color: var(--add); }
+.chg.changed { background: var(--chg-bg); color: var(--chg); }
+.chg.removed { background: var(--del-bg); color: var(--del); }
+.changes { background: var(--panel); border: 1px solid var(--border); border-left: 4px solid var(--chg); border-radius: 10px; padding: 10px 14px; margin-bottom: 18px; font-size: 13.5px; }
+.changes.bad { border-left-color: var(--del); }
+.changes.added { border-left-color: var(--add); }
+.changes ul { list-style: none; margin: 8px 0 0; padding: 0; columns: 2 280px; }
+.changes li { padding: 2px 0; break-inside: avoid; }
+.changes p { margin: 6px 0 0; }
+tr.removed td { opacity: .7; }
+tr.removed .rn { text-decoration: line-through; }
+pre.diff .d-add { background: var(--add-bg); color: var(--add); display: inline-block; width: 100%; }
+pre.diff .d-del { background: var(--del-bg); color: var(--del); display: inline-block; width: 100%; }
+pre.diff .d-hunk { color: var(--muted); }
+.node.diff-added .box { stroke: var(--add); stroke-width: 2.2; }
+.node.diff-changed .box { stroke: var(--chg); stroke-width: 2.2; }
+.node.diff-removed .box { stroke: var(--del); stroke-width: 2; stroke-dasharray: 6 4; }
+.node.diff-removed { opacity: .75; }
+.node.diff-removed .nm { text-decoration: line-through; }
+.node .chgb text { font-size: 9.5px; font-weight: 700; }
+.node.diff-added .chgb rect { fill: var(--add-bg); } .node.diff-added .chgb text { fill: var(--add); }
+.node.diff-changed .chgb rect { fill: var(--chg-bg); } .node.diff-changed .chgb text { fill: var(--chg); }
+.node.diff-removed .chgb rect { fill: var(--del-bg); } .node.diff-removed .chgb text { fill: var(--del); }
