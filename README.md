@@ -158,6 +158,9 @@ Inputs come from `<file>.inputs.json` next to the file and the
 
 ## CI and releases
 
+The Rust version (currently 1.99.0) is pinned in `rust-toolchain.toml`, which
+`rustup` picks up locally, in CI and in the release and Docker builds.
+
 `.github/workflows/ci.yml` runs on every push: `cargo fmt --check`, clippy
 with warnings as errors, the tests (Linux and macOS, with the Kubernetes
 schema fetched), the examples, the VS Code extension package, and a smoke

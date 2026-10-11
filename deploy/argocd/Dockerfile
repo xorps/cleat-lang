@@ -1,8 +1,9 @@
 # Sidecar image for argocd-repo-server: the cleat binary plus the plugin config.
 # Build from the repository root:  docker build -f deploy/argocd/Dockerfile -t cleat-cmp:dev .
-FROM rust:1.97-slim AS build
+# Keep in step with rust-toolchain.toml (copied in, so cargo uses exactly that version).
+FROM rust:1.99.0-slim AS build
 WORKDIR /src
-COPY Cargo.toml Cargo.lock ./
+COPY rust-toolchain.toml Cargo.toml Cargo.lock ./
 COPY src src
 RUN cargo build --release --locked --bin cleat
 
