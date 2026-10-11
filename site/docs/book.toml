@@ -1,0 +1,17 @@
+[book]
+title = "Cleat"
+description = "A typed configuration language for Kubernetes"
+authors = ["The Cleat Authors"]
+language = "en"
+src = "src"
+
+[output.html]
+site-url = "/cleat-lang/"
+git-repository-url = "https://github.com/xorps/cleat-lang"
+edit-url-template = "https://github.com/xorps/cleat-lang/edit/main/site/docs/{path}"
+default-theme = "light"
+preferred-dark-theme = "navy"
+additional-css = ["theme/cleat.css"]
+
+[output.html.fold]
+enable = false

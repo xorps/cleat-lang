@@ -12,7 +12,8 @@ a dependency-free VS Code extension and an Argo CD plugin:
   language server, Argo CD plugin). Its `FsHost` reads files and parses YAML.
 - `crates/cleat-wasm`: the core compiled to WebAssembly for the browser
   playground, with files held in memory.
-- `site/playground`: the playground page (plain HTML/CSS/JS, no build step).
+- `site/`: the website on GitHub Pages: mdBook docs (`site/docs`) and the
+  playground page (`site/playground`, plain HTML/CSS/JS, no build step).
 
 [SPEC.md](SPEC.md) is the source of truth for language behavior; read the
 relevant section before changing semantics.
@@ -32,6 +33,8 @@ cargo run -- export examples/quickstart.cleat --set env=prod --set image=x
 cargo run -- gen schemas/kubernetes-1.37.json # print the types generated from a schema
 cargo run -- complete <file> <line> <col>     # debug completion (0-based line/col)
 
+site/build.sh                                 # docs + playground into _site/ (pinned, verified mdBook)
+python3 -m http.server -d _site 8000          # preview the site at http://localhost:8000/
 editors/vscode/package.sh                     # build cleat.vsix (no npm); node --check the extension
 deploy/argocd/e2e/run.sh                      # real Argo CD on a throwaway kind cluster (needs docker, kubectl)
 deploy/argocd/e2e/run.sh cleanup              # delete that cluster
@@ -67,6 +70,7 @@ Paths below are in `crates/cleat-core/src/` unless they say otherwise.
 | `crates/cleat/src/main.rs` | CLI, including `cleat argocd generate|params` for the Argo CD plugin |
 | `crates/cleat-wasm/src/lib.rs` | The playground's WebAssembly interface: one JSON-in, JSON-out call over a `MemHost` |
 | `site/playground/` | The playground page: editor, highlighting, hover, completion, inputs, share links |
+| `site/docs/` | The documentation (mdBook); `reference/spec.md` includes `SPEC.md` |
 | `editors/vscode/` | Extension: TextMate grammar, a small LSP client, live preview |
 | `deploy/argocd/` | Plugin config, distroless sidecar Dockerfile, repo-server patch, e2e test |
 
@@ -145,7 +149,9 @@ Add a test for every bug fix.
 ## Documentation
 
 - Language behavior: update the relevant section of [SPEC.md](SPEC.md).
-- User-facing changes: update [README.md](README.md). Its first example is
+- User-facing changes: update [README.md](README.md) and the guides in
+  `site/docs/src/`. Code and output in the docs are real: check snippets
+  with `cleat check` and paste actual output. Its first example is
   `examples/quickstart.cleat`, and its output blocks are real output; keep
   them in sync if messages change.
 - Keep the examples passing `cleat check`.
@@ -156,9 +162,9 @@ Add a test for every bug fix.
   comment; Dependabot updates them.
 - Docker base images and the Dockerfile frontend are pinned by digest.
 - Downloads are checksum-verified: Kubernetes schemas against
-  `schemas/SHA256SUMS`, and `kind` and the Argo CD manifest in
-  `deploy/argocd/e2e/run.sh`. When adding a schema version, review the file
-  and add its checksum.
+  `schemas/SHA256SUMS`, `kind` and the Argo CD manifest in
+  `deploy/argocd/e2e/run.sh`, and mdBook in `site/build.sh`. When adding a
+  schema version, review the file and add its checksum.
 - Updating Rust means changing `rust-toolchain.toml` and the `rust:<version>`
   image in `deploy/argocd/Dockerfile`.
 

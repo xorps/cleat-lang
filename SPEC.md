@@ -385,11 +385,11 @@ refinements.
 
 An input's value is decoded according to its declared type:
 
-- From a JSON file (`--input values.json`), which holds an object of inputs.
+- From a JSON or YAML file (`--input values.json`), which holds an object of inputs.
 - From the command line (`--set replicas=3`). If the type accepts the raw
   string, the input is that string. Otherwise the string is parsed as JSON.
   So `--set name=web` is a string and `--set replicas=3` is an int.
-- From Argo CD (`--argocd`), which reads the `ARGOCD_APP_PARAMETERS`
+- From Argo CD (`--argocd-params`, used by `cleat argocd generate`), which reads the `ARGOCD_APP_PARAMETERS`
   environment variable. String parameters are decoded as with `--set`; array
   and map parameters as lists and maps.
 
