@@ -125,9 +125,11 @@ impl P<'_> {
         if !float && let Ok(i) = text.parse::<i64>() {
             return Ok(Value::Int(i));
         }
-        text.parse::<f64>()
-            .map(Value::Float)
-            .map_err(|_| format!("invalid JSON number `{text}`"))
+        match text.parse::<f64>() {
+            Ok(x) if x.is_finite() => Ok(Value::Float(x)),
+            Ok(_) => Err(format!("JSON number `{text}` is out of range")),
+            Err(_) => Err(format!("invalid JSON number `{text}`")),
+        }
     }
 
     fn string(&mut self) -> Result<String, String> {

@@ -34,6 +34,10 @@ null | true | false | <int> | <float> | "<string>" | [v, ...] | { key: v, ... }
 ```
 
 - Ints are 64-bit and floats are IEEE doubles. Both serialize as JSON numbers.
+  JSON has no infinity or NaN, so floats are always finite: a literal, input
+  or imported number out of range is an error, as are float overflow and
+  division by zero (`.inf` and `.nan` in YAML files are rejected too).
+  Integer overflow is an error as well.
 - Objects keep the order of their keys. When a value is checked against a
   record type, fields filled in from a single-literal type (`apiVersion`,
   `kind`) come first, then the given fields in source order, then other

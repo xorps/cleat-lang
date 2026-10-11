@@ -1111,13 +1111,23 @@ impl Evaluator {
                     Value::Int(r.ok_or_else(|| self.error(span, "integer overflow"))?)
                 }
                 _ => match (num(&a), num(&b)) {
-                    (Some(x), Some(y)) => Value::Float(match op {
-                        Add => x + y,
-                        Sub => x - y,
-                        Mul => x * y,
-                        Div => x / y,
-                        _ => x % y,
-                    }),
+                    (Some(x), Some(y)) => {
+                        if matches!(op, Div | Rem) && y == 0.0 {
+                            return Err(self.error(span, "division by zero"));
+                        }
+                        let r = match op {
+                            Add => x + y,
+                            Sub => x - y,
+                            Mul => x * y,
+                            Div => x / y,
+                            _ => x % y,
+                        };
+                        // Values are JSON, which has no infinity or NaN.
+                        if !r.is_finite() {
+                            return Err(self.error(span, "float overflow: the result is too large for a JSON number"));
+                        }
+                        Value::Float(r)
+                    }
                     _ => return Err(self.error(span, bad())),
                 },
             },
