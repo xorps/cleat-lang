@@ -13,3 +13,6 @@ path = "src/bin/cleat.rs"
 [dependencies]
 regex = "1"
 yaml-rust2 = "0.10"
+
+[profile.release]
+strip = true

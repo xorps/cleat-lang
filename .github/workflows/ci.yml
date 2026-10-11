@@ -50,11 +50,16 @@ jobs:
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       - run: docker build -f deploy/argocd/Dockerfile -t cleat-cmp:ci .
-      - name: Smoke test
+      - name: Smoke test (distroless: inspect from outside, no shell inside)
         run: |
-          docker run --rm cleat-cmp:ci id -u | grep -qx 999
-          docker run --rm cleat-cmp:ci test -f /home/argocd/cmp-server/config/plugin.yaml
+          test "$(docker image inspect --format '{{.Config.User}}' cleat-cmp:ci)" = 999
           docker run --rm cleat-cmp:ci cleat 2>&1 | grep -q "cleat argocd generate"
+          c=$(docker create cleat-cmp:ci cleat)
+          docker cp "$c:/home/argocd/cmp-server/config/plugin.yaml" plugin.yaml
+          docker cp "$c:/usr/local/bin/cleat" cleat-bin
+          docker rm "$c"
+          cmp plugin.yaml deploy/argocd/plugin.yaml
+          file cleat-bin | grep -q "static"
 
   argocd-e2e:
     # Slow (creates a kind cluster and installs Argo CD): weekly and on demand.
