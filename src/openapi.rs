@@ -17,10 +17,10 @@ pub struct Generated {
 
 /// Generate types from parsed documents: one OpenAPI document, or any number of CRDs.
 pub fn generate(docs: &[Value]) -> Result<Generated, String> {
-    if let [doc] = docs {
-        if doc.get("swagger").is_some() || doc.get("openapi").is_some() {
-            return from_openapi(doc);
-        }
+    if let [doc] = docs
+        && (doc.get("swagger").is_some() || doc.get("openapi").is_some())
+    {
+        return from_openapi(doc);
     }
     let mut crds = Vec::new();
     for d in docs {
@@ -28,7 +28,11 @@ pub fn generate(docs: &[Value]) -> Result<Generated, String> {
             Some("CustomResourceDefinition") => crds.push(d),
             Some("List") | Some("CustomResourceDefinitionList") => {
                 if let Some(Value::List(items)) = d.get("items") {
-                    crds.extend(items.iter().filter(|i| str_of(i.get("kind")) == Some("CustomResourceDefinition")));
+                    crds.extend(
+                        items
+                            .iter()
+                            .filter(|i| str_of(i.get("kind")) == Some("CustomResourceDefinition")),
+                    );
                 }
             }
             _ => {}
@@ -55,7 +59,10 @@ const KEYWORDS: [&str; 16] = [
 const BUILTIN: [&str; 6] = ["Never", "Json", "Bool", "Int", "Float", "Str"];
 
 fn ident(seg: &str) -> String {
-    let mut s: String = seg.chars().map(|c| if c.is_ascii_alphanumeric() || c == '_' { c } else { '_' }).collect();
+    let mut s: String = seg
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() || c == '_' { c } else { '_' })
+        .collect();
     if s.is_empty() || s.starts_with(|c: char| c.is_ascii_digit()) {
         s.insert(0, '_');
     }
@@ -103,7 +110,9 @@ fn key(k: &str) -> String {
 }
 
 /// Stability rank of a version segment: (GA=2/beta=1/alpha=0, major, minor). Higher is preferred.
-fn version_rank(v: &str) -> Option<(u8, u32, u32)> {
+type VersionRank = (u8, u32, u32);
+
+fn version_rank(v: &str) -> Option<VersionRank> {
     let rest = v.strip_prefix('v')?;
     let digits: String = rest.chars().take_while(char::is_ascii_digit).collect();
     let major = digits.parse().ok()?;
@@ -112,17 +121,20 @@ fn version_rank(v: &str) -> Option<(u8, u32, u32)> {
         (2, 0)
     } else if let Some(n) = tail.strip_prefix("beta") {
         (1, n.parse().unwrap_or(0))
-    } else if let Some(n) = tail.strip_prefix("alpha") {
-        (0, n.parse().unwrap_or(0))
     } else {
-        return None;
+        let n = tail.strip_prefix("alpha")?;
+        (0, n.parse().unwrap_or(0))
     };
     Some((stability, major, minor))
 }
 
 fn first_line(s: &str) -> String {
     let line = s.lines().next().unwrap_or("").trim();
-    if line.chars().count() > 120 { format!("{}…", line.chars().take(117).collect::<String>()) } else { line.to_string() }
+    if line.chars().count() > 120 {
+        format!("{}…", line.chars().take(117).collect::<String>())
+    } else {
+        line.to_string()
+    }
 }
 
 struct Gen {
@@ -180,13 +192,20 @@ impl Gen {
             }
             source.push_str(&format!("type {name} = {body}\n"));
         }
-        Generated { source, docs: self.docs }
+        Generated {
+            source,
+            docs: self.docs,
+        }
     }
 
     /// The Cleat type for a schema. `hint` names nested objects when `name_nested` is set.
     fn ty(&mut self, s: &Value, hint: &str) -> String {
         let t = self.ty_inner(s, hint);
-        if s.get("nullable") == Some(&Value::Bool(true)) { format!("({t}) | null") } else { t }
+        if s.get("nullable") == Some(&Value::Bool(true)) {
+            format!("({t}) | null")
+        } else {
+            t
+        }
     }
 
     fn ty_inner(&mut self, s: &Value, hint: &str) -> String {
@@ -303,11 +322,19 @@ impl Gen {
 }
 
 fn paren(t: &str) -> String {
-    if t.contains(" where ") || t.contains(" | ") { format!("({t})") } else { t.to_string() }
+    if t.contains(" where ") || t.contains(" | ") {
+        format!("({t})")
+    } else {
+        t.to_string()
+    }
 }
 
 fn refine(base: &str, preds: Vec<String>) -> String {
-    if preds.is_empty() { base.to_string() } else { format!("{base} where {}", preds.join(" && ")) }
+    if preds.is_empty() {
+        base.to_string()
+    } else {
+        format!("{base} where {}", preds.join(" && "))
+    }
 }
 
 fn num(v: Option<&Value>) -> Option<String> {
@@ -322,10 +349,16 @@ fn number_preds(s: &Value) -> Vec<String> {
     let mut p = Vec::new();
     let excl = |k: &str| s.get(k) == Some(&Value::Bool(true));
     if let Some(m) = num(s.get("minimum")) {
-        p.push(format!("self {} {m}", if excl("exclusiveMinimum") { ">" } else { ">=" }));
+        p.push(format!(
+            "self {} {m}",
+            if excl("exclusiveMinimum") { ">" } else { ">=" }
+        ));
     }
     if let Some(m) = num(s.get("maximum")) {
-        p.push(format!("self {} {m}", if excl("exclusiveMaximum") { "<" } else { "<=" }));
+        p.push(format!(
+            "self {} {m}",
+            if excl("exclusiveMaximum") { "<" } else { "<=" }
+        ));
     }
     p
 }
@@ -339,10 +372,10 @@ fn string_preds(s: &Value) -> Vec<String> {
         p.push(format!("len(self) <= {n}"));
     }
     // Patterns Rust's regex engine can't compile (e.g. lookaround) are skipped.
-    if let Some(re) = str_of(s.get("pattern")) {
-        if regex::Regex::new(re).is_ok() {
-            p.push(format!("matches(self, {})", lit_str(re)));
-        }
+    if let Some(re) = str_of(s.get("pattern"))
+        && regex::Regex::new(re).is_ok()
+    {
+        p.push(format!("matches(self, {})", lit_str(re)));
     }
     p
 }
@@ -421,12 +454,18 @@ fn local_name(def: &str) -> String {
 }
 
 fn gvk(s: &Value) -> Option<(String, String)> {
-    let Some(Value::List(gvks)) = s.get("x-kubernetes-group-version-kind") else { return None };
+    let Some(Value::List(gvks)) = s.get("x-kubernetes-group-version-kind") else {
+        return None;
+    };
     let [g] = gvks.as_slice() else { return None };
     let group = str_of(g.get("group")).unwrap_or("");
     let version = str_of(g.get("version"))?;
     let kind = str_of(g.get("kind"))?;
-    let api = if group.is_empty() { version.to_string() } else { format!("{group}/{version}") };
+    let api = if group.is_empty() {
+        version.to_string()
+    } else {
+        format!("{group}/{version}")
+    };
     Some((api, kind.to_string()))
 }
 
@@ -462,46 +501,158 @@ fn with_gvk(s: &Value, api: &str, kind: &str) -> Value {
 /// description). `[]` marks the elements of a list. Only long-stable enums are
 /// listed: a value missing here would reject valid manifests, and `with` can't widen.
 pub const KUBERNETES_ENUMS: &[(&str, &str, &[&str])] = &[
-    ("core.v1.ServiceSpec", "type", &["ClusterIP", "NodePort", "LoadBalancer", "ExternalName"]),
+    (
+        "core.v1.ServiceSpec",
+        "type",
+        &["ClusterIP", "NodePort", "LoadBalancer", "ExternalName"],
+    ),
     ("core.v1.ServiceSpec", "sessionAffinity", &["ClientIP", "None"]),
     ("core.v1.ServiceSpec", "externalTrafficPolicy", &["Cluster", "Local"]),
     ("core.v1.ServiceSpec", "internalTrafficPolicy", &["Cluster", "Local"]),
-    ("core.v1.ServiceSpec", "ipFamilyPolicy", &["SingleStack", "PreferDualStack", "RequireDualStack"]),
+    (
+        "core.v1.ServiceSpec",
+        "ipFamilyPolicy",
+        &["SingleStack", "PreferDualStack", "RequireDualStack"],
+    ),
     ("core.v1.ServiceSpec", "ipFamilies[]", &["IPv4", "IPv6"]),
     ("core.v1.ServicePort", "protocol", &["TCP", "UDP", "SCTP"]),
     ("core.v1.ContainerPort", "protocol", &["TCP", "UDP", "SCTP"]),
-    ("core.v1.Container", "imagePullPolicy", &["Always", "IfNotPresent", "Never"]),
-    ("core.v1.Container", "terminationMessagePolicy", &["File", "FallbackToLogsOnError"]),
-    ("core.v1.EphemeralContainer", "imagePullPolicy", &["Always", "IfNotPresent", "Never"]),
+    (
+        "core.v1.Container",
+        "imagePullPolicy",
+        &["Always", "IfNotPresent", "Never"],
+    ),
+    (
+        "core.v1.Container",
+        "terminationMessagePolicy",
+        &["File", "FallbackToLogsOnError"],
+    ),
+    (
+        "core.v1.EphemeralContainer",
+        "imagePullPolicy",
+        &["Always", "IfNotPresent", "Never"],
+    ),
     ("core.v1.PodSpec", "restartPolicy", &["Always", "OnFailure", "Never"]),
-    ("core.v1.PodSpec", "dnsPolicy", &["ClusterFirstWithHostNet", "ClusterFirst", "Default", "None"]),
-    ("core.v1.PodSpec", "preemptionPolicy", &["PreemptLowerPriority", "Never"]),
+    (
+        "core.v1.PodSpec",
+        "dnsPolicy",
+        &["ClusterFirstWithHostNet", "ClusterFirst", "Default", "None"],
+    ),
+    (
+        "core.v1.PodSpec",
+        "preemptionPolicy",
+        &["PreemptLowerPriority", "Never"],
+    ),
     ("core.v1.Toleration", "operator", &["Exists", "Equal"]),
-    ("core.v1.Toleration", "effect", &["", "NoSchedule", "PreferNoSchedule", "NoExecute"]),
-    ("core.v1.Taint", "effect", &["NoSchedule", "PreferNoSchedule", "NoExecute"]),
-    ("core.v1.NodeSelectorRequirement", "operator", &["In", "NotIn", "Exists", "DoesNotExist", "Gt", "Lt"]),
-    ("meta.v1.LabelSelectorRequirement", "operator", &["In", "NotIn", "Exists", "DoesNotExist"]),
-    ("core.v1.TopologySpreadConstraint", "whenUnsatisfiable", &["DoNotSchedule", "ScheduleAnyway"]),
-    ("core.v1.TopologySpreadConstraint", "nodeAffinityPolicy", &["Honor", "Ignore"]),
-    ("core.v1.TopologySpreadConstraint", "nodeTaintsPolicy", &["Honor", "Ignore"]),
-    ("core.v1.PersistentVolumeClaimSpec", "accessModes[]", &["ReadWriteOnce", "ReadOnlyMany", "ReadWriteMany", "ReadWriteOncePod"]),
-    ("core.v1.PersistentVolumeClaimSpec", "volumeMode", &["Filesystem", "Block"]),
-    ("core.v1.PodSecurityContext", "fsGroupChangePolicy", &["OnRootMismatch", "Always"]),
-    ("core.v1.SeccompProfile", "type", &["Localhost", "RuntimeDefault", "Unconfined"]),
+    (
+        "core.v1.Toleration",
+        "effect",
+        &["", "NoSchedule", "PreferNoSchedule", "NoExecute"],
+    ),
+    (
+        "core.v1.Taint",
+        "effect",
+        &["NoSchedule", "PreferNoSchedule", "NoExecute"],
+    ),
+    (
+        "core.v1.NodeSelectorRequirement",
+        "operator",
+        &["In", "NotIn", "Exists", "DoesNotExist", "Gt", "Lt"],
+    ),
+    (
+        "meta.v1.LabelSelectorRequirement",
+        "operator",
+        &["In", "NotIn", "Exists", "DoesNotExist"],
+    ),
+    (
+        "core.v1.TopologySpreadConstraint",
+        "whenUnsatisfiable",
+        &["DoNotSchedule", "ScheduleAnyway"],
+    ),
+    (
+        "core.v1.TopologySpreadConstraint",
+        "nodeAffinityPolicy",
+        &["Honor", "Ignore"],
+    ),
+    (
+        "core.v1.TopologySpreadConstraint",
+        "nodeTaintsPolicy",
+        &["Honor", "Ignore"],
+    ),
+    (
+        "core.v1.PersistentVolumeClaimSpec",
+        "accessModes[]",
+        &["ReadWriteOnce", "ReadOnlyMany", "ReadWriteMany", "ReadWriteOncePod"],
+    ),
+    (
+        "core.v1.PersistentVolumeClaimSpec",
+        "volumeMode",
+        &["Filesystem", "Block"],
+    ),
+    (
+        "core.v1.PodSecurityContext",
+        "fsGroupChangePolicy",
+        &["OnRootMismatch", "Always"],
+    ),
+    (
+        "core.v1.SeccompProfile",
+        "type",
+        &["Localhost", "RuntimeDefault", "Unconfined"],
+    ),
     ("core.v1.HTTPGetAction", "scheme", &["HTTP", "HTTPS"]),
     ("apps.v1.DeploymentStrategy", "type", &["Recreate", "RollingUpdate"]),
-    ("apps.v1.StatefulSetSpec", "podManagementPolicy", &["OrderedReady", "Parallel"]),
-    ("apps.v1.StatefulSetUpdateStrategy", "type", &["OnDelete", "RollingUpdate"]),
-    ("apps.v1.DaemonSetUpdateStrategy", "type", &["OnDelete", "RollingUpdate"]),
+    (
+        "apps.v1.StatefulSetSpec",
+        "podManagementPolicy",
+        &["OrderedReady", "Parallel"],
+    ),
+    (
+        "apps.v1.StatefulSetUpdateStrategy",
+        "type",
+        &["OnDelete", "RollingUpdate"],
+    ),
+    (
+        "apps.v1.DaemonSetUpdateStrategy",
+        "type",
+        &["OnDelete", "RollingUpdate"],
+    ),
     ("batch.v1.JobSpec", "completionMode", &["NonIndexed", "Indexed"]),
-    ("batch.v1.JobSpec", "podReplacementPolicy", &["TerminatingOrFailed", "Failed"]),
-    ("batch.v1.CronJobSpec", "concurrencyPolicy", &["Allow", "Forbid", "Replace"]),
-    ("networking.v1.HTTPIngressPath", "pathType", &["Exact", "Prefix", "ImplementationSpecific"]),
-    ("networking.v1.NetworkPolicySpec", "policyTypes[]", &["Ingress", "Egress"]),
+    (
+        "batch.v1.JobSpec",
+        "podReplacementPolicy",
+        &["TerminatingOrFailed", "Failed"],
+    ),
+    (
+        "batch.v1.CronJobSpec",
+        "concurrencyPolicy",
+        &["Allow", "Forbid", "Replace"],
+    ),
+    (
+        "networking.v1.HTTPIngressPath",
+        "pathType",
+        &["Exact", "Prefix", "ImplementationSpecific"],
+    ),
+    (
+        "networking.v1.NetworkPolicySpec",
+        "policyTypes[]",
+        &["Ingress", "Egress"],
+    ),
     ("networking.v1.NetworkPolicyPort", "protocol", &["TCP", "UDP", "SCTP"]),
-    ("autoscaling.v2.MetricSpec", "type", &["ContainerResource", "External", "Object", "Pods", "Resource"]),
-    ("autoscaling.v2.MetricTarget", "type", &["AverageValue", "Utilization", "Value"]),
-    ("policy.v1.PodDisruptionBudgetSpec", "unhealthyPodEvictionPolicy", &["IfHealthyBudget", "AlwaysAllow"]),
+    (
+        "autoscaling.v2.MetricSpec",
+        "type",
+        &["ContainerResource", "External", "Object", "Pods", "Resource"],
+    ),
+    (
+        "autoscaling.v2.MetricTarget",
+        "type",
+        &["AverageValue", "Utilization", "Value"],
+    ),
+    (
+        "policy.v1.PodDisruptionBudgetSpec",
+        "unhealthyPodEvictionPolicy",
+        &["IfHealthyBudget", "AlwaysAllow"],
+    ),
 ];
 
 /// Add `enum` to the curated Kubernetes fields of definition `local` (e.g. `core.v1.ServiceSpec`).
@@ -514,8 +665,12 @@ fn apply_kubernetes_enums(local: &str, s: &mut Value) -> usize {
             None => (*field, false),
         };
         let Value::Obj(es) = s else { continue };
-        let Some((_, Value::Obj(props))) = es.iter_mut().find(|(k, _)| k == "properties") else { continue };
-        let Some((_, prop)) = props.iter_mut().find(|(k, _)| k == name) else { continue };
+        let Some((_, Value::Obj(props))) = es.iter_mut().find(|(k, _)| k == "properties") else {
+            continue;
+        };
+        let Some((_, prop)) = props.iter_mut().find(|(k, _)| k == name) else {
+            continue;
+        };
         let target = if list {
             match prop {
                 Value::Obj(p) => match p.iter_mut().find(|(k, _)| k == "items") {
@@ -527,24 +682,32 @@ fn apply_kubernetes_enums(local: &str, s: &mut Value) -> usize {
         } else {
             prop
         };
-        if let Value::Obj(t) = target {
-            if str_of(t.iter().find(|(k, _)| k == "type").map(|(_, v)| v)) == Some("string") {
-                t.retain(|(k, _)| k != "enum");
-                t.push(("enum".into(), Value::List(values.iter().map(|v| Value::Str(v.to_string())).collect())));
-                n += 1;
-            }
+        if let Value::Obj(t) = target
+            && str_of(t.iter().find(|(k, _)| k == "type").map(|(_, v)| v)) == Some("string")
+        {
+            t.retain(|(k, _)| k != "enum");
+            t.push((
+                "enum".into(),
+                Value::List(values.iter().map(|v| Value::Str(v.to_string())).collect()),
+            ));
+            n += 1;
         }
     }
     n
 }
 
 fn from_openapi(doc: &Value) -> Result<Generated, String> {
-    let (defs_v, prefix) = match (doc.get("definitions"), doc.get("components").and_then(|c| c.get("schemas"))) {
+    let (defs_v, prefix) = match (
+        doc.get("definitions"),
+        doc.get("components").and_then(|c| c.get("schemas")),
+    ) {
         (Some(d), _) => (d, "#/definitions/"),
         (None, Some(d)) => (d, "#/components/schemas/"),
         _ => return Err("OpenAPI document has no `definitions` or `components.schemas`".into()),
     };
-    let Value::Obj(entries) = defs_v else { return Err("schema definitions must be an object".into()) };
+    let Value::Obj(entries) = defs_v else {
+        return Err("schema definitions must be an object".into());
+    };
     let defs: Vec<(String, &Value)> = entries.iter().map(|(k, v)| (k.clone(), v)).collect();
 
     let mut g = Gen::new(prefix, false);
@@ -593,7 +756,11 @@ fn from_openapi(doc: &Value) -> Result<Generated, String> {
         }
         let rank = |n: &String| {
             let segs: Vec<&str> = n.split('.').collect();
-            segs.iter().rev().nth(1).and_then(|v| version_rank(v)).unwrap_or((2, 0, 0))
+            segs.iter()
+                .rev()
+                .nth(1)
+                .and_then(|v| version_rank(v))
+                .unwrap_or((2, 0, 0))
         };
         cands.sort_by_key(|c| std::cmp::Reverse(rank(c)));
         if cands.len() == 1 || rank(&cands[0]) > rank(&cands[1]) {
@@ -614,9 +781,14 @@ const OBJECT_META: &str = "{\n  name?: Str,\n  generateName?: Str,\n  namespace?
 fn from_crds(crds: &[&Value]) -> Result<Generated, String> {
     let mut g = Gen::new("#/", true);
     g.taken.insert("ObjectMeta".into());
-    g.emit("ObjectMeta".into(), OBJECT_META.into(), Some("Standard object metadata (subset; other fields are allowed)."));
+    g.emit(
+        "ObjectMeta".into(),
+        OBJECT_META.into(),
+        Some("Standard object metadata (subset; other fields are allowed)."),
+    );
 
-    let mut kinds: HashMap<String, Vec<(String, (u8, u32, u32), bool)>> = HashMap::new(); // kind -> (name, rank, storage)
+    // kind -> (type name, version rank, is the storage version)
+    let mut kinds: HashMap<String, Vec<(String, VersionRank, bool)>> = HashMap::new();
     for crd in crds {
         let spec = crd.get("spec").ok_or("CRD without `spec`")?;
         let group = str_of(spec.get("group")).ok_or("CRD without `spec.group`")?;
@@ -635,23 +807,37 @@ fn from_crds(crds: &[&Value]) -> Result<Generated, String> {
             }
             _ => {
                 let name = str_of(spec.get("version")).ok_or("CRD without `spec.versions`")?;
-                versions.push((name.to_string(), spec.get("validation").and_then(|s| s.get("openAPIV3Schema")), true));
+                versions.push((
+                    name.to_string(),
+                    spec.get("validation").and_then(|s| s.get("openAPIV3Schema")),
+                    true,
+                ));
             }
         }
         for (ver, schema, storage) in versions {
             let api = format!("{group}/{ver}");
             let base = format!("{}.{}", ident(&ver), ident(kind));
-            let name = if g.taken.contains(&base) { format!("{}.{base}", ident(&group.replace('.', "_"))) } else { base };
+            let name = if g.taken.contains(&base) {
+                format!("{}.{base}", ident(&group.replace('.', "_")))
+            } else {
+                base
+            };
             let name = g.fresh(&name);
             g.cur_def = name.clone();
             let empty = Value::Obj(vec![("type".into(), Value::Str("object".into()))]);
             let mut s = with_gvk(schema.unwrap_or(&empty), &api, kind);
             // `metadata` in CRD schemas is untyped; use the standard fields.
-            if let Value::Obj(es) = &mut s {
-                if let Some((_, Value::Obj(props))) = es.iter_mut().find(|(k, _)| k == "properties") {
-                    props.retain(|(k, _)| k != "metadata");
-                    props.insert(2, ("metadata".into(), Value::Obj(vec![("$ref".into(), Value::Str("#/ObjectMeta".into()))])));
-                }
+            if let Value::Obj(es) = &mut s
+                && let Some((_, Value::Obj(props))) = es.iter_mut().find(|(k, _)| k == "properties")
+            {
+                props.retain(|(k, _)| k != "metadata");
+                props.insert(
+                    2,
+                    (
+                        "metadata".into(),
+                        Value::Obj(vec![("$ref".into(), Value::Str("#/ObjectMeta".into()))]),
+                    ),
+                );
             }
             g.names.insert("ObjectMeta".into(), "ObjectMeta".into());
             let body = g.record(&s, &name, "  ");
@@ -684,7 +870,9 @@ fn from_crds(crds: &[&Value]) -> Result<Generated, String> {
 
 /// How many of `KUBERNETES_ENUMS` apply to a schema (for tests: a renamed field shows up here).
 pub fn kubernetes_enums_applied(doc: &Value) -> usize {
-    let Some(Value::Obj(defs)) = doc.get("definitions") else { return 0 };
+    let Some(Value::Obj(defs)) = doc.get("definitions") else {
+        return 0;
+    };
     defs.iter()
         .map(|(k, s)| {
             let mut s = s.clone();

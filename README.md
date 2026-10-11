@@ -146,6 +146,18 @@ Inputs come from `<file>.inputs.json` next to the file and the
 | computed port out of range | `cleat export` | ``argument `port` of `container`: 70080 does not satisfy …``, followed by the call stack |
 | component dependency cycle | `cleat check` | `dependency cycle between components: a -> b -> a` |
 
+## CI and releases
+
+`.github/workflows/ci.yml` runs on every push: `cargo fmt --check`, clippy
+with warnings as errors, the tests (Linux and macOS, with the Kubernetes
+schema fetched), the examples, the VS Code extension package, and a smoke
+test of the Argo CD sidecar image. The Argo CD end-to-end test runs weekly
+and on demand.
+
+Pushing a tag like `v0.1.0` runs `release.yml`: binaries for Linux and macOS
+(x86_64 and arm64), the `.vsix`, and a multi-arch sidecar image at
+`ghcr.io/<owner>/cleat-cmp:<tag>`, attached to a GitHub release.
+
 ## Layout
 
 | Module | Role |

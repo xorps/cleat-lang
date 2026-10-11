@@ -270,7 +270,10 @@ impl Expr {
             return self.clone();
         }
         let without = |names: &[&str]| -> Vec<(String, Expr)> {
-            map.iter().filter(|(n, _)| !names.contains(&n.as_str())).cloned().collect()
+            map.iter()
+                .filter(|(n, _)| !names.contains(&n.as_str()))
+                .cloned()
+                .collect()
         };
         let go = |e: &Expr| e.subst_many(map);
         let kind = match &self.kind {
@@ -296,15 +299,23 @@ impl Expr {
             ExprKind::Index(b, i) => ExprKind::Index(Box::new(go(b)), Box::new(go(i))),
             ExprKind::Call(f, args) => ExprKind::Call(
                 f.clone(),
-                args.iter().map(|a| Arg { name: a.name.clone(), value: go(&a.value) }).collect(),
+                args.iter()
+                    .map(|a| Arg {
+                        name: a.name.clone(),
+                        value: go(&a.value),
+                    })
+                    .collect(),
             ),
             ExprKind::Typed(t, e) => ExprKind::Typed(t.clone(), Box::new(go(e))),
             ExprKind::Unary(op, x) => ExprKind::Unary(*op, Box::new(go(x))),
             ExprKind::Binary(op, l, r) => ExprKind::Binary(*op, Box::new(go(l)), Box::new(go(r))),
             ExprKind::If(c, t, e) => ExprKind::If(Box::new(go(c)), Box::new(go(t)), Box::new(go(e))),
-            ExprKind::Let(n, t, v, b) => {
-                ExprKind::Let(n.clone(), t.clone(), Box::new(go(v)), Box::new(b.subst_many(&without(&[n]))))
-            }
+            ExprKind::Let(n, t, v, b) => ExprKind::Let(
+                n.clone(),
+                t.clone(),
+                Box::new(go(v)),
+                Box::new(b.subst_many(&without(&[n]))),
+            ),
             ExprKind::With(b, patches) => ExprKind::With(
                 Box::new(go(b)),
                 patches
@@ -335,7 +346,10 @@ impl Expr {
                     .map(|a| {
                         let bound = a.pat.binders();
                         let names: Vec<&str> = bound.iter().map(String::as_str).collect();
-                        Arm { pat: a.pat.clone(), body: a.body.subst_many(&without(&names)) }
+                        Arm {
+                            pat: a.pat.clone(),
+                            body: a.body.subst_many(&without(&names)),
+                        }
                     })
                     .collect(),
             ),
@@ -434,8 +448,11 @@ fn subst_item(item: &ListItem, map: &[(String, Expr)]) -> ListItem {
         ListItem::Spread(e) => ListItem::Spread(e.subst_many(map)),
         ListItem::If(c, i) => ListItem::If(c.subst_many(map), Box::new(subst_item(i, map))),
         ListItem::For(a, b, e, i) => {
-            let inner: Vec<(String, Expr)> =
-                map.iter().filter(|(n, _)| n != a && Some(n) != b.as_ref()).cloned().collect();
+            let inner: Vec<(String, Expr)> = map
+                .iter()
+                .filter(|(n, _)| n != a && Some(n) != b.as_ref())
+                .cloned()
+                .collect();
             ListItem::For(a.clone(), b.clone(), e.subst_many(map), Box::new(subst_item(i, &inner)))
         }
     }
@@ -447,12 +464,17 @@ fn subst_members(ms: &[Member], map: &[(String, Expr)]) -> Vec<Member> {
             Member::Field(k, e, s) => Member::Field(k.clone(), e.subst_many(map), *s),
             Member::Computed(k, v) => Member::Computed(k.subst_many(map), v.subst_many(map)),
             Member::Spread(e) => Member::Spread(e.subst_many(map)),
-            Member::If(c, t, e) => {
-                Member::If(c.subst_many(map), subst_members(t, map), e.as_ref().map(|e| subst_members(e, map)))
-            }
+            Member::If(c, t, e) => Member::If(
+                c.subst_many(map),
+                subst_members(t, map),
+                e.as_ref().map(|e| subst_members(e, map)),
+            ),
             Member::For(a, b, e, body) => {
-                let inner: Vec<(String, Expr)> =
-                    map.iter().filter(|(n, _)| n != a && Some(n) != b.as_ref()).cloned().collect();
+                let inner: Vec<(String, Expr)> = map
+                    .iter()
+                    .filter(|(n, _)| n != a && Some(n) != b.as_ref())
+                    .cloned()
+                    .collect();
                 Member::For(a.clone(), b.clone(), e.subst_many(map), subst_members(body, &inner))
             }
         })
@@ -513,7 +535,10 @@ pub enum TypeKind {
     List(Box<TypeExpr>),
     Tuple(Vec<TypeExpr>),
     Map(Box<TypeExpr>),
-    Record { fields: Vec<FieldDecl>, open: bool },
+    Record {
+        fields: Vec<FieldDecl>,
+        open: bool,
+    },
     Union(Vec<TypeExpr>),
     /// Predicate binder is always `self` (the parser rewrites field/param binders).
     Refine(Box<TypeExpr>, Expr),
@@ -613,16 +638,44 @@ pub struct FnDecl {
 
 #[derive(Debug, Clone)]
 pub enum Item {
-    Type { name: String, ty: TypeExpr, span: Span },
-    Input { name: String, ty: TypeExpr, default: Option<Expr>, span: Span },
-    Let { name: String, ty: Option<TypeExpr>, value: Expr, span: Span },
+    Type {
+        name: String,
+        ty: TypeExpr,
+        span: Span,
+    },
+    Input {
+        name: String,
+        ty: TypeExpr,
+        default: Option<Expr>,
+        span: Span,
+    },
+    Let {
+        name: String,
+        ty: Option<TypeExpr>,
+        value: Expr,
+        span: Span,
+    },
     Fn(FnDecl),
     /// `export e` or `export name (after a, b)? = e`. Named exports are
     /// components; `after` orders them (Argo sync waves, Flux `dependsOn`).
-    Export { name: Option<String>, after: Vec<(String, Span)>, value: Expr, span: Span },
+    Export {
+        name: Option<String>,
+        after: Vec<(String, Span)>,
+        value: Expr,
+        span: Span,
+    },
     /// ES-style imports: `import * as ns`, `import { a, b as c }`, or
     /// `import x ... with { type: "json" | "yaml" | "text" }`.
-    Import { form: ImportForm, path: String, attrs: Vec<(String, String, Span)>, span: Span },
+    Import {
+        form: ImportForm,
+        path: String,
+        attrs: Vec<(String, String, Span)>,
+        span: Span,
+    },
     /// `refine T with { ... }`: narrow an existing (usually imported) type in place.
-    Refine { name: String, patches: Vec<Patch>, span: Span },
+    Refine {
+        name: String,
+        patches: Vec<Patch>,
+        span: Span,
+    },
 }

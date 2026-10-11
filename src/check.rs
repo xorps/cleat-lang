@@ -1,8 +1,8 @@
 //! Static checking (SPEC §7 steps 2–3): bidirectional type checking with
 //! field-aware diagnostics, plus verification conditions for refinements.
 
-use std::collections::HashSet;
 use std::collections::HashMap;
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
 use crate::ast::*;
@@ -80,7 +80,10 @@ impl DefSite {
 
     /// Seen from an importer: a site in the module's own file gets that file's path.
     fn from_module(d: &Option<DefSite>, module: &Path) -> Option<DefSite> {
-        d.as_ref().map(|d| DefSite { file: Some(d.file.clone().unwrap_or_else(|| module.to_path_buf())), span: d.span })
+        d.as_ref().map(|d| DefSite {
+            file: Some(d.file.clone().unwrap_or_else(|| module.to_path_buf())),
+            span: d.span,
+        })
     }
 }
 
@@ -110,7 +113,9 @@ thread_local! {
 pub fn checked_module(path: &Path, root: Option<&Path>) -> Result<std::sync::Arc<CheckedModule>, String> {
     static CACHE: std::sync::OnceLock<CheckedCache> = std::sync::OnceLock::new();
     let cache = CACHE.get_or_init(Default::default);
-    let canon = path.canonicalize().map_err(|e| format!("cannot read `{}`: {e}", path.display()))?;
+    let canon = path
+        .canonicalize()
+        .map_err(|e| format!("cannot read `{}`: {e}", path.display()))?;
     let key = (canon.clone(), root.map(Path::to_path_buf));
     let hit = cache.lock().unwrap().get(&key).cloned();
     if let Some(c) = hit.filter(|c| crate::modules::fresh(&c.deps)) {
@@ -142,6 +147,9 @@ pub fn checked_module(path: &Path, root: Option<&Path>) -> Result<std::sync::Arc
     cache.lock().unwrap().insert(key, checked.clone());
     Ok(checked)
 }
+
+/// An exported component: name, where it is declared, and its `after` dependencies.
+type ComponentDecl = (String, Span, Vec<(String, Span)>);
 
 #[derive(Clone)]
 struct FnSig {
@@ -186,24 +194,39 @@ pub fn check_program_in(items: &[Item], base: Option<&Path>, root: Option<&Path>
         out: Outcome::default(),
     };
     c.run(items);
-    let mut fns: Vec<(String, Signature)> =
-        c.fns
-            .iter()
-            .map(|(n, s)| (n.clone(), Signature { params: s.params.clone(), ret: s.ret.clone(), def: s.def.clone() }))
-            .collect();
+    let mut fns: Vec<(String, Signature)> = c
+        .fns
+        .iter()
+        .map(|(n, s)| {
+            (
+                n.clone(),
+                Signature {
+                    params: s.params.clone(),
+                    ret: s.ret.clone(),
+                    def: s.def.clone(),
+                },
+            )
+        })
+        .collect();
     fns.sort_by(|a, b| a.0.cmp(&b.0));
     c.out.fns = fns;
     let globals: Vec<(String, Ty)> = c
         .global_names
         .iter()
-        .filter_map(|n| c.scope.iter().rev().find(|(s, _)| s == n).map(|(_, t)| (n.clone(), t.clone())))
+        .filter_map(|n| {
+            c.scope
+                .iter()
+                .rev()
+                .find(|(s, _)| s == n)
+                .map(|(_, t)| (n.clone(), t.clone()))
+        })
         .collect();
     c.out.globals = globals;
     for n in &c.global_names {
-        if let Some(i) = c.scope.iter().rposition(|(s, _)| s == n) {
-            if let Some(d) = c.scope_defs[i].clone() {
-                c.out.global_defs.insert(n.clone(), d);
-            }
+        if let Some(i) = c.scope.iter().rposition(|(s, _)| s == n)
+            && let Some(d) = c.scope_defs[i].clone()
+        {
+            c.out.global_defs.insert(n.clone(), d);
         }
     }
     let mut out = c.out;
@@ -215,13 +238,13 @@ pub fn check_program_in(items: &[Item], base: Option<&Path>, root: Option<&Path>
 
 /// Prefer the field expression of an object literal over `e.f`, so VCs read naturally.
 fn project(subject: &Expr, name: &str) -> Expr {
-    if let ExprKind::Object(ms) = &subject.kind {
-        if let Some(e) = ms.iter().rev().find_map(|m| match m {
+    if let ExprKind::Object(ms) = &subject.kind
+        && let Some(e) = ms.iter().rev().find_map(|m| match m {
             Member::Field(k, e, _) if k == name => Some(e),
             _ => None,
-        }) {
-            return e.clone();
-        }
+        })
+    {
+        return e.clone();
     }
     Expr::field(subject.clone(), Label::Name(name.to_string()))
 }
@@ -232,7 +255,9 @@ fn mentions(e: &Expr, name: &str) -> bool {
 }
 
 fn did_you_mean<'a>(name: &str, candidates: impl Iterator<Item = &'a str>) -> String {
-    suggest(name, candidates).map(|s| format!("; did you mean `{s}`?")).unwrap_or_default()
+    suggest(name, candidates)
+        .map(|s| format!("; did you mean `{s}`?"))
+        .unwrap_or_default()
 }
 
 struct Checker {
@@ -310,15 +335,33 @@ impl Checker {
     }
 
     fn hover(&mut self, span: Span, token: &str, text: String) {
-        self.out.hovers.push(Hover { span, len: token.chars().count(), text, doc: None, def: None });
+        self.out.hovers.push(Hover {
+            span,
+            len: token.chars().count(),
+            text,
+            doc: None,
+            def: None,
+        });
     }
 
     fn hover_doc(&mut self, span: Span, token: &str, text: String, doc: Option<String>) {
-        self.out.hovers.push(Hover { span, len: token.chars().count(), text, doc, def: None });
+        self.out.hovers.push(Hover {
+            span,
+            len: token.chars().count(),
+            text,
+            doc,
+            def: None,
+        });
     }
 
     fn hover_def(&mut self, span: Span, token: &str, text: String, doc: Option<String>, def: Option<DefSite>) {
-        self.out.hovers.push(Hover { span, len: token.chars().count(), text, doc, def });
+        self.out.hovers.push(Hover {
+            span,
+            len: token.chars().count(),
+            text,
+            doc,
+            def,
+        });
     }
 
     /// Follow aliases that are just other names (`k8s.Deployment` -> `k8s.apps.v1.Deployment`).
@@ -360,21 +403,33 @@ impl Checker {
         let base = format!("{name}#{n}");
         self.ctx.alias_src.insert(base.clone(), old);
         let te = TypeExpr {
-            kind: TypeKind::With(Box::new(TypeExpr { kind: TypeKind::Named(base), span }), patches.to_vec()),
+            kind: TypeKind::With(
+                Box::new(TypeExpr {
+                    kind: TypeKind::Named(base),
+                    span,
+                }),
+                patches.to_vec(),
+            ),
             span,
         };
         self.ctx.alias_src.insert(name.to_string(), te);
     }
 
     fn import_label(&self, ns: &str) -> String {
-        self.hidden_labels.get(ns).cloned().unwrap_or_else(|| format!("import `{ns}`"))
+        self.hidden_labels
+            .get(ns)
+            .cloned()
+            .unwrap_or_else(|| format!("import `{ns}`"))
     }
 
     /// The three ES import forms (SPEC §4.1).
     fn import_item(&mut self, form: &ImportForm, path: &str, attrs: &[(String, String, Span)], span: Span) {
         for (k, _, sp) in attrs {
             if k != "type" {
-                self.error(*sp, format!("unsupported import attribute `{k}` (only `type` is supported)"));
+                self.error(
+                    *sp,
+                    format!("unsupported import attribute `{k}` (only `type` is supported)"),
+                );
             }
         }
         let ty_attr = attrs.iter().find(|(k, _, _)| k == "type");
@@ -432,7 +487,13 @@ impl Checker {
         let q = format!("{hidden}.{orig}");
         if self.ctx.failed_namespaces.contains(hidden) {
             // Already reported at the import; make the name usable without further errors.
-            self.ctx.alias_src.insert(local.to_string(), TypeExpr { kind: TypeKind::Named("Json".into()), span: sp });
+            self.ctx.alias_src.insert(
+                local.to_string(),
+                TypeExpr {
+                    kind: TypeKind::Named("Json".into()),
+                    span: sp,
+                },
+            );
             self.push_scope(local, Ty::Error, DefSite::here(sp));
             return;
         }
@@ -441,7 +502,13 @@ impl Checker {
             if BUILTIN_TYPES.contains(&local) || self.ctx.alias_src.contains_key(local) {
                 self.error(sp, format!("type `{local}` is already defined"));
             } else {
-                self.ctx.alias_src.insert(local.to_string(), TypeExpr { kind: TypeKind::Named(q.clone()), span: sp });
+                self.ctx.alias_src.insert(
+                    local.to_string(),
+                    TypeExpr {
+                        kind: TypeKind::Named(q.clone()),
+                        span: sp,
+                    },
+                );
             }
             found = true;
         }
@@ -476,9 +543,20 @@ impl Checker {
                 qualified[0]
             )
         } else {
-            let mut names: Vec<String> = self.ctx.alias_src.keys().filter(|k| k.starts_with(&prefix)).cloned().collect();
+            let mut names: Vec<String> = self
+                .ctx
+                .alias_src
+                .keys()
+                .filter(|k| k.starts_with(&prefix))
+                .cloned()
+                .collect();
             names.extend(self.fns.keys().filter(|k| k.starts_with(&prefix)).cloned());
-            names.extend(self.scope.iter().map(|(n, _)| n.clone()).filter(|k| k.starts_with(&prefix)));
+            names.extend(
+                self.scope
+                    .iter()
+                    .map(|(n, _)| n.clone())
+                    .filter(|k| k.starts_with(&prefix)),
+            );
             let local_names: Vec<&str> = names.iter().map(|n| &n[prefix.len()..]).collect();
             let hint = did_you_mean(orig, local_names.into_iter());
             format!("`{path}` has no export `{orig}`{hint}")
@@ -507,13 +585,24 @@ impl Checker {
         let locals: HashSet<&str> = module
             .items
             .iter()
-            .filter_map(|i| if let Item::Type { name, .. } = i { Some(name.as_str()) } else { None })
+            .filter_map(|i| {
+                if let Item::Type { name, .. } = i {
+                    Some(name.as_str())
+                } else {
+                    None
+                }
+            })
             .collect();
         for item in &module.items {
             if let Item::Type { name, ty, span } = item {
-                self.ctx.alias_src.insert(format!("{prefix}{name}"), qualify(ty, &prefix, &locals));
+                self.ctx
+                    .alias_src
+                    .insert(format!("{prefix}{name}"), qualify(ty, &prefix, &locals));
                 if let Some(generated) = &module.generated {
-                    let def = DefSite { file: Some(generated.clone()), span: *span };
+                    let def = DefSite {
+                        file: Some(generated.clone()),
+                        span: *span,
+                    };
                     self.ctx.alias_defs.insert(format!("{prefix}{name}"), def);
                 }
             }
@@ -541,15 +630,29 @@ impl Checker {
         let keys: HashSet<&str> = out.ctx.alias_src.keys().map(String::as_str).collect();
         let q = |t: &Ty| t.map_aliases(&|n| keys.contains(n).then(|| format!("{prefix}{n}")));
         for (name, te) in &out.ctx.alias_src {
-            self.ctx.alias_src.insert(format!("{prefix}{name}"), qualify(te, &prefix, &keys));
+            self.ctx
+                .alias_src
+                .insert(format!("{prefix}{name}"), qualify(te, &prefix, &keys));
         }
         for (k, d) in &out.ctx.docs {
             self.ctx.docs.insert(format!("{prefix}{k}"), d.clone());
         }
         for (name, sig) in &out.fns {
-            let params = sig.params.iter().map(|(p, t, d)| (p.clone(), q(t), d.clone())).collect();
+            let params = sig
+                .params
+                .iter()
+                .map(|(p, t, d)| (p.clone(), q(t), d.clone()))
+                .collect();
             let def = DefSite::from_module(&sig.def, full);
-            self.fns.insert(format!("{prefix}{name}"), FnSig { params, ret: q(&sig.ret), index: usize::MAX, def });
+            self.fns.insert(
+                format!("{prefix}{name}"),
+                FnSig {
+                    params,
+                    ret: q(&sig.ret),
+                    index: usize::MAX,
+                    def,
+                },
+            );
         }
         for (name, t) in &out.globals {
             let t = q(t);
@@ -573,7 +676,10 @@ impl Checker {
             q(t).alias_names(&mut names);
         }
         for n in names {
-            self.ctx.resolve(&TypeExpr { kind: TypeKind::Named(n), span });
+            self.ctx.resolve(&TypeExpr {
+                kind: TypeKind::Named(n),
+                span,
+            });
         }
         self.drain_type_diags();
     }
@@ -607,7 +713,11 @@ impl Checker {
     }
 
     fn label_for(&self, span: Span) -> Option<String> {
-        self.labels.iter().rev().find(|(s, _)| *s == span).map(|(_, l)| l.clone())
+        self.labels
+            .iter()
+            .rev()
+            .find(|(s, _)| *s == span)
+            .map(|(_, l)| l.clone())
     }
 
     /// Check `e` against `t`, naming it `label` in messages if it is an anonymous literal.
@@ -625,7 +735,13 @@ impl Checker {
 
     fn run(&mut self, items: &[Item]) {
         for item in items {
-            if let Item::Import { form, path, attrs, span } = item {
+            if let Item::Import {
+                form,
+                path,
+                attrs,
+                span,
+            } = item
+            {
                 self.import_item(form, path, attrs, *span);
             }
         }
@@ -635,7 +751,13 @@ impl Checker {
                     self.error(*span, format!("type `{name}` is already defined"));
                 } else {
                     self.ctx.alias_src.insert(name.clone(), ty.clone());
-                    self.ctx.alias_defs.insert(name.clone(), DefSite { file: None, span: *span });
+                    self.ctx.alias_defs.insert(
+                        name.clone(),
+                        DefSite {
+                            file: None,
+                            span: *span,
+                        },
+                    );
                 }
             }
         }
@@ -646,23 +768,34 @@ impl Checker {
         }
         for item in items {
             if let Item::Type { name, ty, span } = item {
-                let named = TypeExpr { kind: TypeKind::Named(name.clone()), span: *span };
+                let named = TypeExpr {
+                    kind: TypeKind::Named(name.clone()),
+                    span: *span,
+                };
                 self.ctx.resolve(&named);
                 self.drain_type_diags();
                 self.check_type_preds(ty);
             }
         }
 
-        let mut components: Vec<(String, Span, Vec<(String, Span)>)> = Vec::new();
+        let mut components: Vec<ComponentDecl> = Vec::new();
         for (index, item) in items.iter().enumerate() {
             match item {
                 Item::Type { .. } | Item::Import { .. } => {}
                 Item::Refine { name, .. } => {
                     // Resolve now so patch errors are reported even if the type is unused.
-                    self.ctx.resolve(&TypeExpr { kind: TypeKind::Named(name.clone()), span: item_span(item) });
+                    self.ctx.resolve(&TypeExpr {
+                        kind: TypeKind::Named(name.clone()),
+                        span: item_span(item),
+                    });
                     self.drain_type_diags();
                 }
-                Item::Input { name, ty, default, span } => {
+                Item::Input {
+                    name,
+                    ty,
+                    default,
+                    span,
+                } => {
                     let t = self.resolve_te(ty);
                     if let Some(d) = default {
                         self.check(d, &t);
@@ -683,7 +816,12 @@ impl Checker {
                     self.global_names.push(name.clone());
                 }
                 Item::Fn(f) => self.check_fn(f, index),
-                Item::Export { name, after, value, span } => {
+                Item::Export {
+                    name,
+                    after,
+                    value,
+                    span,
+                } => {
                     self.synth(value);
                     if let Some(n) = name {
                         if components.iter().any(|(c, _, _)| c == n) {
@@ -699,7 +837,7 @@ impl Checker {
     }
 
     /// `after` must name exported components and must not form a cycle.
-    fn check_components(&mut self, comps: &[(String, Span, Vec<(String, Span)>)]) {
+    fn check_components(&mut self, comps: &[ComponentDecl]) {
         let names: Vec<&str> = comps.iter().map(|(n, _, _)| n.as_str()).collect();
         for (n, _, after) in comps {
             for (d, dspan) in after {
@@ -714,7 +852,7 @@ impl Checker {
         // Depth-first search for cycles; report each once.
         fn visit<'a>(
             n: &'a str,
-            comps: &'a [(String, Span, Vec<(String, Span)>)],
+            comps: &'a [ComponentDecl],
             stack: &mut Vec<&'a str>,
             done: &mut HashSet<&'a str>,
             cycles: &mut Vec<(Span, String)>,
@@ -725,8 +863,14 @@ impl Checker {
             if let Some(pos) = stack.iter().position(|s| *s == n) {
                 let mut path: Vec<&str> = stack[pos..].to_vec();
                 path.push(n);
-                let span = comps.iter().find(|(c, _, _)| c == n).map_or(Span::default(), |(_, s, _)| *s);
-                cycles.push((span, format!("dependency cycle between components: {}", path.join(" -> "))));
+                let span = comps
+                    .iter()
+                    .find(|(c, _, _)| c == n)
+                    .map_or(Span::default(), |(_, s, _)| *s);
+                cycles.push((
+                    span,
+                    format!("dependency cycle between components: {}", path.join(" -> ")),
+                ));
                 return;
             }
             stack.push(n);
@@ -768,8 +912,19 @@ impl Checker {
         }
         let ret_ann = f.ret.as_ref().map(|te| self.resolve_te(te));
         let def = DefSite::here(f.span);
-        self.fns.insert(f.name.clone(), FnSig { params, ret: ret_ann.clone().unwrap_or(Ty::Error), index, def });
-        let saved = (std::mem::replace(&mut self.cur_fn, f.name.clone()), self.cur_index.replace(index));
+        self.fns.insert(
+            f.name.clone(),
+            FnSig {
+                params,
+                ret: ret_ann.clone().unwrap_or(Ty::Error),
+                index,
+                def,
+            },
+        );
+        let saved = (
+            std::mem::replace(&mut self.cur_fn, f.name.clone()),
+            self.cur_index.replace(index),
+        );
         let ret = match ret_ann {
             Some(t) => {
                 self.check(&f.body, &t);
@@ -813,7 +968,14 @@ impl Checker {
         let mut items: Vec<Completion> = Vec::new();
         let mut push = |label: &str, kind, detail: Option<String>| {
             if !items.iter().any(|c| c.label == label) {
-                items.push(Completion { label: label.into(), kind, detail, doc: None, insert: label.into(), preferred: false });
+                items.push(Completion {
+                    label: label.into(),
+                    kind,
+                    detail,
+                    doc: None,
+                    insert: label.into(),
+                    preferred: false,
+                });
             }
         };
         if ns.is_none() {
@@ -821,7 +983,13 @@ impl Checker {
                 push(b, CompletionKind::Type, None);
             }
         }
-        let mut names: Vec<String> = self.ctx.alias_src.keys().filter(|k| k.starts_with(&prefix) && !k.contains('#')).cloned().collect();
+        let mut names: Vec<String> = self
+            .ctx
+            .alias_src
+            .keys()
+            .filter(|k| k.starts_with(&prefix) && !k.contains('#'))
+            .cloned()
+            .collect();
         names.sort();
         for n in names {
             let rest = &n[prefix.len()..];
@@ -844,17 +1012,33 @@ impl Checker {
     fn complete_patterns(&mut self, t: &Ty) {
         let ms = self.ctx.members(t);
         let mut items = Vec::new();
-        let records: Vec<Rec> = ms.iter().filter_map(|m| if let Ty::Record(r) = self.ctx.shape(m) { Some(r) } else { None }).collect();
+        let records: Vec<Rec> = ms
+            .iter()
+            .filter_map(|m| {
+                if let Ty::Record(r) = self.ctx.shape(m) {
+                    Some(r)
+                } else {
+                    None
+                }
+            })
+            .collect();
         // A field with a different literal type in every record member discriminates the union.
         let discriminant = records.first().and_then(|r0| {
             r0.fields.iter().map(|f| f.name.clone()).find(|name| {
                 let lits: Vec<Ty> = records
                     .iter()
-                    .filter_map(|r| r.get(name).map(|f| self.ctx.shape(&f.ty)).filter(|t| matches!(t, Ty::Lit(_))))
+                    .filter_map(|r| {
+                        r.get(name)
+                            .map(|f| self.ctx.shape(&f.ty))
+                            .filter(|t| matches!(t, Ty::Lit(_)))
+                    })
                     .collect();
                 records.len() > 1
                     && lits.len() == records.len()
-                    && lits.iter().enumerate().all(|(i, a)| lits[i + 1..].iter().all(|b| b != a))
+                    && lits
+                        .iter()
+                        .enumerate()
+                        .all(|(i, a)| lits[i + 1..].iter().all(|b| b != a))
             })
         });
         for m in &ms {
@@ -991,7 +1175,11 @@ impl Checker {
     /// Where a type alias is defined (following plain renames to the real definition).
     fn type_def(&self, name: &str) -> Option<DefSite> {
         let canon = self.canonical(name);
-        self.ctx.alias_defs.get(&canon).or_else(|| self.ctx.alias_defs.get(name)).cloned()
+        self.ctx
+            .alias_defs
+            .get(&canon)
+            .or_else(|| self.ctx.alias_defs.get(name))
+            .cloned()
     }
 
     /// Bind a variable and record what its type tells us about it.
@@ -1004,7 +1192,8 @@ impl Checker {
     fn bind_let(&mut self, name: &str, t: Ty, value: &Expr, span: Span) {
         self.bind_var(name, t.clone(), span);
         if value.is_pure() && !mentions(value, name) && self.sub(&t, &Ty::Union(vec![Ty::Float, Ty::Str, Ty::Bool])) {
-            self.hyps.push(Expr::binary(BinOp::Eq, Expr::var(name, span), value.clone()));
+            self.hyps
+                .push(Expr::binary(BinOp::Eq, Expr::var(name, span), value.clone()));
         }
     }
 
@@ -1058,7 +1247,11 @@ impl Checker {
                     let ms = self.union_members(t);
                     self.union(ms.into_iter().filter(|m| self.ctx.shape(m) != lt).collect())
                 };
-                if narrowed == Ty::Never { vec![] } else { vec![(var.clone(), narrowed)] }
+                if narrowed == Ty::Never {
+                    vec![]
+                } else {
+                    vec![(var.clone(), narrowed)]
+                }
             }
             ExprKind::Binary(BinOp::And, a, b) if positive => {
                 let mut v = self.narrowings(a, true);
@@ -1080,9 +1273,19 @@ impl Checker {
     fn push_vc(&mut self, hyps: Vec<Expr>, goal: Expr, span: Span, reason: String) {
         let status = triage(&hyps, &goal);
         if status == VcStatus::Refuted {
-            self.error(span, format!("refinement violated: `{goal}` is false (required by {reason})"));
+            self.error(
+                span,
+                format!("refinement violated: `{goal}` is false (required by {reason})"),
+            );
         }
-        self.out.vcs.push(Vc { func: self.cur_fn.clone(), span, hyps, goal, reason, status });
+        self.out.vcs.push(Vc {
+            func: self.cur_fn.clone(),
+            span,
+            hyps,
+            goal,
+            reason,
+            status,
+        });
     }
 
     /// `subject : actual` flows into `expected`: emit a VC for every refinement
@@ -1145,7 +1348,11 @@ impl Checker {
 
     fn subsume(&mut self, actual: &Ty, expected: &Ty, subject: &Expr) {
         if !self.sub(actual, expected) {
-            let mut msg = format!("type mismatch: expected `{}`, found `{}`", self.norm(expected), self.norm(actual));
+            let mut msg = format!(
+                "type mismatch: expected `{}`, found `{}`",
+                self.norm(expected),
+                self.norm(actual)
+            );
             let nullable = self.union_members(actual).iter().any(|m| self.is_null(m));
             if nullable && !self.union_members(expected).iter().any(|m| self.is_null(m)) {
                 msg.push_str(" (the value may be null; use `??` to provide a default)");
@@ -1175,14 +1382,14 @@ impl Checker {
             }
         }
         // A refinement on a composite literal: check the shape field by field, then the predicate.
-        if let Ty::Refine(base, pred) = self.ctx.unfold(&self.norm(expected)) {
-            if matches!(e.kind, ExprKind::Object(_) | ExprKind::List(_) | ExprKind::Tuple(_)) {
-                self.check(e, &base);
-                let goal = pred.subst("self", e);
-                let hyps = self.hyps.clone();
-                self.push_vc(hyps, goal, e.span, format!("`{}`", self.norm(expected)));
-                return;
-            }
+        if let Ty::Refine(base, pred) = self.ctx.unfold(&self.norm(expected))
+            && matches!(e.kind, ExprKind::Object(_) | ExprKind::List(_) | ExprKind::Tuple(_))
+        {
+            self.check(e, &base);
+            let goal = pred.subst("self", e);
+            let hyps = self.hyps.clone();
+            self.push_vc(hyps, goal, e.span, format!("`{}`", self.norm(expected)));
+            return;
         }
         match &e.kind {
             ExprKind::If(c, t, f) => {
@@ -1303,7 +1510,11 @@ impl Checker {
                         .fields
                         .iter()
                         .filter(|f| f.presence == Presence::Required && !guaranteed.contains(&f.name))
-                        .filter(|f| !unknown.iter().any(|u| suggest(u, std::iter::once(f.name.as_str())).is_some()))
+                        .filter(|f| {
+                            !unknown
+                                .iter()
+                                .any(|u| suggest(u, std::iter::once(f.name.as_str())).is_some())
+                        })
                         .collect();
                     for f in missing {
                         let msg = format!("missing required field `{}` (`{}`) in `{shown}`", f.name, f.ty);
@@ -1364,10 +1575,19 @@ impl Checker {
     fn check_members(&mut self, ms: &[Member], r: &Rec, shown: &str) -> (HashSet<String>, bool) {
         let mut guaranteed = HashSet::new();
         let mut dynamic = false;
-        if ms.iter().any(|m| matches!(m, Member::Field(k, _, _) if k == COMPLETE_NAME)) {
+        if ms
+            .iter()
+            .any(|m| matches!(m, Member::Field(k, _, _) if k == COMPLETE_NAME))
+        {
             let present: Vec<&str> = ms
                 .iter()
-                .filter_map(|m| if let Member::Field(k, _, _) = m { Some(k.as_str()) } else { None })
+                .filter_map(|m| {
+                    if let Member::Field(k, _, _) = m {
+                        Some(k.as_str())
+                    } else {
+                        None
+                    }
+                })
                 .collect();
             self.complete_fields(r, shown, &present);
         }
@@ -1426,7 +1646,10 @@ impl Checker {
                                         }
                                     }
                                     None if !r.open => {
-                                        self.error(e.span, format!("spread adds unknown field `{}` to `{shown}`", sf.name));
+                                        self.error(
+                                            e.span,
+                                            format!("spread adds unknown field `{}` to `{shown}`", sf.name),
+                                        );
                                     }
                                     None => {}
                                 }
@@ -1502,7 +1725,11 @@ impl Checker {
     /// Bind the variables of `for a(, b) in src`.
     fn bind_loop(&mut self, a: &str, b: Option<&str>, src: &Expr) {
         let st = self.synth(src);
-        let ms: Vec<Ty> = self.union_members(&st).into_iter().filter(|m| !self.is_null(m)).collect();
+        let ms: Vec<Ty> = self
+            .union_members(&st)
+            .into_iter()
+            .filter(|m| !self.is_null(m))
+            .collect();
         let st = self.union(ms);
         let (ka, va) = match self.ctx.shape(&st) {
             Ty::List(t) => (Ty::Int, *t),
@@ -1541,7 +1768,10 @@ impl Checker {
                     if let InterpPart::Expr(x) = p {
                         let t = self.synth(x);
                         if !self.sub(&t, &scalar) {
-                            self.error(x.span, format!("cannot interpolate `{t}`; only strings, numbers and booleans"));
+                            self.error(
+                                x.span,
+                                format!("cannot interpolate `{t}`; only strings, numbers and booleans"),
+                            );
                         }
                     }
                 }
@@ -1572,7 +1802,10 @@ impl Checker {
             ExprKind::Field(b, label, optional) => {
                 if *label == Label::Name(COMPLETE_NAME.into()) {
                     match qualified_name(b) {
-                        Some(ns) if self.lookup(&ns).is_none() && self.namespaces.contains(ns.split('.').next().unwrap_or("")) => {
+                        Some(ns)
+                            if self.lookup(&ns).is_none()
+                                && self.namespaces.contains(ns.split('.').next().unwrap_or("")) =>
+                        {
                             self.complete_namespace(&ns);
                         }
                         _ => {
@@ -1595,10 +1828,17 @@ impl Checker {
                             self.hover_def(e.span, &label_s, format!("{q}: {t}"), None, def);
                             return t;
                         }
-                        let candidates: Vec<String> =
-                            self.scope.iter().map(|(n, _)| n.clone()).filter(|n| n.starts_with(&format!("{root}."))).collect();
+                        let candidates: Vec<String> = self
+                            .scope
+                            .iter()
+                            .map(|(n, _)| n.clone())
+                            .filter(|n| n.starts_with(&format!("{root}.")))
+                            .collect();
                         let hint = did_you_mean(&q, candidates.iter().map(String::as_str));
-                        self.error(e.span, format!("module `{root}` has no value `{}`{hint}", &q[root.len() + 1..]));
+                        self.error(
+                            e.span,
+                            format!("module `{root}` has no value `{}`{hint}", &q[root.len() + 1..]),
+                        );
                         return Ty::Error;
                     }
                 }
@@ -1613,7 +1853,12 @@ impl Checker {
                     Label::Pos(_) => None,
                 };
                 let label_s = label.to_string();
-                self.hover_doc(e.span, &label_s, field_text.unwrap_or_else(|| format!("{label}: {t}")), doc);
+                self.hover_doc(
+                    e.span,
+                    &label_s,
+                    field_text.unwrap_or_else(|| format!("{label}: {t}")),
+                    doc,
+                );
                 t
             }
             ExprKind::Index(b, i) => self.synth_index(b, i, e.span),
@@ -1628,7 +1873,10 @@ impl Checker {
                     return Ty::Error;
                 }
                 // Resolve it (and everything it refers to) before checking against it.
-                self.ctx.resolve(&TypeExpr { kind: TypeKind::Named(tname.clone()), span: e.span });
+                self.ctx.resolve(&TypeExpr {
+                    kind: TypeKind::Named(tname.clone()),
+                    span: e.span,
+                });
                 self.drain_type_diags();
                 let text = self.alias_text(tname);
                 let doc = self.type_doc(tname);
@@ -1747,12 +1995,26 @@ impl Checker {
         overridable: &mut HashSet<String>,
         conditional: bool,
     ) {
-        let presence = if conditional { Presence::Optional } else { Presence::Required };
+        let presence = if conditional {
+            Presence::Optional
+        } else {
+            Presence::Required
+        };
         for m in ms {
             match m {
                 Member::Field(k, e, span) => {
                     let t = self.synth(e);
-                    self.add_field(fields, overridable, Field { name: k.clone(), ty: t, presence: presence.clone() }, false, *span);
+                    self.add_field(
+                        fields,
+                        overridable,
+                        Field {
+                            name: k.clone(),
+                            ty: t,
+                            presence: presence.clone(),
+                        },
+                        false,
+                        *span,
+                    );
                 }
                 Member::Computed(k, v) => {
                     self.check(k, &Ty::Str);
@@ -1764,7 +2026,11 @@ impl Checker {
                     match self.ctx.shape(&st) {
                         Ty::Record(r) => {
                             for f in r.fields {
-                                let presence = if conditional || !f.present() { Presence::Optional } else { Presence::Required };
+                                let presence = if conditional || !f.present() {
+                                    Presence::Optional
+                                } else {
+                                    Presence::Required
+                                };
                                 self.add_field(fields, overridable, Field { presence, ..f }, true, e.span);
                             }
                         }
@@ -1790,7 +2056,11 @@ impl Checker {
                     }
                     // Present in both branches => present; otherwise optional.
                     let mut names: Vec<String> = ft.iter().map(|f| f.name.clone()).collect();
-                    names.extend(fe.iter().map(|f| f.name.clone()).filter(|n| !ft.iter().any(|f| f.name == *n)));
+                    names.extend(
+                        fe.iter()
+                            .map(|f| f.name.clone())
+                            .filter(|n| !ft.iter().any(|f| f.name == *n)),
+                    );
                     for n in names {
                         let a = ft.iter().find(|f| f.name == n);
                         let b = fe.iter().find(|f| f.name == n);
@@ -1812,7 +2082,14 @@ impl Checker {
         }
     }
 
-    fn add_field(&mut self, fields: &mut Vec<Field>, overridable: &mut HashSet<String>, f: Field, from_spread: bool, span: Span) {
+    fn add_field(
+        &mut self,
+        fields: &mut Vec<Field>,
+        overridable: &mut HashSet<String>,
+        f: Field,
+        from_spread: bool,
+        span: Span,
+    ) {
         let Some(existing) = fields.iter_mut().find(|x| x.name == f.name) else {
             if from_spread {
                 overridable.insert(f.name.clone());
@@ -1853,11 +2130,9 @@ impl Checker {
                 }
             }
         }
-        if out.is_empty() && !matches!(self.norm(bt), Ty::Never) {
-            if !optional {
-                self.error(span, format!("cannot read `.{label}` of null"));
-                return Ty::Error;
-            }
+        if out.is_empty() && !matches!(self.norm(bt), Ty::Never) && !optional {
+            self.error(span, format!("cannot read `.{label}` of null"));
+            return Ty::Error;
         }
         if has_null {
             out.push(Ty::null());
@@ -1879,9 +2154,10 @@ impl Checker {
                 }
             },
             (Ty::Map(t), Label::Name(_)) => Ok(Ty::Union(vec![*t, Ty::null()])),
-            (Ty::Tuple(ts), Label::Pos(i)) => {
-                ts.get(*i).cloned().ok_or_else(|| format!("tuple `{m}` has no element {i}"))
-            }
+            (Ty::Tuple(ts), Label::Pos(i)) => ts
+                .get(*i)
+                .cloned()
+                .ok_or_else(|| format!("tuple `{m}` has no element {i}")),
             (Ty::List(_), Label::Pos(_)) => Err("use `xs[i]` to index a list".into()),
             _ => Err(format!("type `{m}` has no field `{label}`")),
         }
@@ -1889,7 +2165,13 @@ impl Checker {
 
     fn synth_index(&mut self, b: &Expr, i: &Expr, span: Span) -> Ty {
         let bt = self.synth(b);
-        let lit_int = |e: &Expr| if let ExprKind::Lit(Lit::Int(n)) = e.kind { usize::try_from(n).ok() } else { None };
+        let lit_int = |e: &Expr| {
+            if let ExprKind::Lit(Lit::Int(n)) = e.kind {
+                usize::try_from(n).ok()
+            } else {
+                None
+            }
+        };
         match self.ctx.shape(&bt) {
             Ty::List(t) => {
                 self.check(i, &Ty::Int);
@@ -1956,7 +2238,10 @@ impl Checker {
                 let lt = self.synth(l);
                 let ms = self.union_members(&lt);
                 if lt != Ty::Error && !ms.iter().any(|m| self.is_null(m)) {
-                    self.warn(l.span, format!("left side of `??` has type `{lt}`, which is never null"));
+                    self.warn(
+                        l.span,
+                        format!("left side of `??` has type `{lt}`, which is never null"),
+                    );
                 }
                 let non_null: Vec<Ty> = ms.into_iter().filter(|m| !self.is_null(m)).collect();
                 let rt = self.synth(r);
@@ -1971,7 +2256,10 @@ impl Checker {
         let both = |c: &Self, t: &Ty| c.sub(&lt, t) && c.sub(&rt, t);
         let fail = |c: &mut Self| {
             let mut msg = format!("operator `{}` cannot be applied to `{lt}` and `{rt}`", op.symbol());
-            if [&lt, &rt].iter().any(|t| c.union_members(t).iter().any(|m| c.is_null(m))) {
+            if [&lt, &rt]
+                .iter()
+                .any(|t| c.union_members(t).iter().any(|m| c.is_null(m)))
+            {
                 msg.push_str(" (a value may be null; use `??` to provide a default)");
             }
             c.error(span, msg);
@@ -2025,7 +2313,9 @@ impl Checker {
         declared: bool,
         name: Option<&str>,
     ) -> Ty {
-        let Some((seg, rest)) = path.split_first() else { return t.clone() };
+        let Some((seg, rest)) = path.split_first() else {
+            return t.clone();
+        };
         let tn = self.norm(t);
         let shown = match name {
             Some(n) => n.to_string(),
@@ -2067,8 +2357,10 @@ impl Checker {
             Ty::Refine(b, _) => self.patch_value_in(&b, path, op, span, declared, name),
             Ty::Union(ms) if ms.contains(&Ty::null()) => {
                 let non_null: Vec<Ty> = ms.iter().filter(|m| **m != Ty::null()).cloned().collect();
-                let patched: Vec<Ty> =
-                    non_null.iter().map(|m| self.patch_value_in(m, path, op, span, declared, name)).collect();
+                let patched: Vec<Ty> = non_null
+                    .iter()
+                    .map(|m| self.patch_value_in(m, path, op, span, declared, name))
+                    .collect();
                 let mut out = patched;
                 if matches!(op, ValueOp::Remove) {
                     out.push(Ty::null());
@@ -2081,7 +2373,10 @@ impl Checker {
                 if cands.is_empty() {
                     return fail(self, format!("no member of `{shown}` has `{seg}`"));
                 }
-                let mut out: Vec<Ty> = cands.iter().map(|m| self.patch_value_in(m, path, op, span, declared, None)).collect();
+                let mut out: Vec<Ty> = cands
+                    .iter()
+                    .map(|m| self.patch_value_in(m, path, op, span, declared, None))
+                    .collect();
                 if declared {
                     return tn;
                 }
@@ -2110,7 +2405,11 @@ impl Checker {
                     // Add the field (creating nested objects for the rest of the path).
                     let vt = self.new_path_ty(rest, op);
                     if !declared {
-                        r.fields.push(Field { name: k.clone(), ty: vt, presence: Presence::Required });
+                        r.fields.push(Field {
+                            name: k.clone(),
+                            ty: vt,
+                            presence: Presence::Required,
+                        });
                     }
                     return Ty::Record(r);
                 };
@@ -2159,7 +2458,11 @@ impl Checker {
                     } else {
                         self.patch_value_in(&vt, rest, op, span, declared, None)
                     };
-                    if declared { tn } else { Ty::Map(Box::new(self.union(vec![*vt, nt]))) }
+                    if declared {
+                        tn
+                    } else {
+                        Ty::Map(Box::new(self.union(vec![*vt, nt])))
+                    }
                 }
                 _ => fail(self, format!("`{seg}` applies to lists, but `{shown}` is an object")),
             },
@@ -2181,12 +2484,13 @@ impl Checker {
                     if selected == Ty::Never {
                         return fail(self, format!("no element of `{shown}` can match `{seg}`"));
                     }
-                    et = Box::new(selected);
+                    *et = selected;
                 }
                 match seg {
-                    PathSeg::Field(_) => {
-                        fail(self, format!("`{shown}` is a list; select elements with `[]`, `[i]` or `[key: value]`"))
-                    }
+                    PathSeg::Field(_) => fail(
+                        self,
+                        format!("`{shown}` is a list; select elements with `[]`, `[i]` or `[key: value]`"),
+                    ),
                     PathSeg::Each if rest.is_empty() && matches!(op, ValueOp::Remove) => {
                         fail(self, "`[]` cannot be removed; set the list to `[]` instead".into())
                     }
@@ -2199,7 +2503,11 @@ impl Checker {
                             self.patch_value_in(&et, rest, op, span, declared, Some(&child))
                         };
                         // Unselected elements keep their type.
-                        if declared { tn } else { Ty::List(Box::new(self.union(vec![all_elems, nt]))) }
+                        if declared {
+                            tn
+                        } else {
+                            Ty::List(Box::new(self.union(vec![all_elems, nt])))
+                        }
                     }
                 }
             }
@@ -2259,7 +2567,13 @@ impl Checker {
             ValueOp::Set(v) => self.synth(v),
             ValueOp::Merge(v) => self.merge_ty(old, v, declared, span),
             ValueOp::Remove => {
-                self.error(span, format!("`{}`: only fields and selected list elements can be removed", fmt_path(path)));
+                self.error(
+                    span,
+                    format!(
+                        "`{}`: only fields and selected list elements can be removed",
+                        fmt_path(path)
+                    ),
+                );
                 Ty::Error
             }
         }
@@ -2272,14 +2586,25 @@ impl Checker {
             ValueOp::Remove => Ty::null(),
         };
         rest.iter().rev().fold(leaf, |t, seg| match seg {
-            PathSeg::Field(k) => Ty::Record(Rec { fields: vec![Field { name: k.clone(), ty: t, presence: Presence::Required }], open: false }),
+            PathSeg::Field(k) => Ty::Record(Rec {
+                fields: vec![Field {
+                    name: k.clone(),
+                    ty: t,
+                    presence: Presence::Required,
+                }],
+                open: false,
+            }),
             _ => Ty::Json,
         })
     }
 
     /// `+:`: append to a list, or JSON-merge-patch an object.
     fn merge_ty(&mut self, target: &Ty, v: &Expr, declared: bool, span: Span) -> Ty {
-        let ms: Vec<Ty> = self.union_members(target).into_iter().filter(|m| !self.is_null(m)).collect();
+        let ms: Vec<Ty> = self
+            .union_members(target)
+            .into_iter()
+            .filter(|m| !self.is_null(m))
+            .collect();
         let non_null = self.union(ms);
         match self.ctx.shape(&non_null) {
             Ty::List(et) => {
@@ -2435,7 +2760,12 @@ impl Checker {
                 push(rest, CompletionKind::Function, Some(Self::fn_sig_text(rest, sig)));
             }
         }
-        let mut types: Vec<&String> = self.ctx.alias_src.keys().filter(|k| k.starts_with(&prefix) && !k.contains('#')).collect();
+        let mut types: Vec<&String> = self
+            .ctx
+            .alias_src
+            .keys()
+            .filter(|k| k.starts_with(&prefix) && !k.contains('#'))
+            .collect();
         types.sort();
         for n in types {
             let rest = &n[prefix.len()..];
@@ -2485,7 +2815,12 @@ impl Checker {
                 });
             }
         }
-        let fns: Vec<(String, FnSig)> = self.fns.iter().filter(|(n, _)| !n.contains('.')).map(|(n, s)| (n.clone(), s.clone())).collect();
+        let fns: Vec<(String, FnSig)> = self
+            .fns
+            .iter()
+            .filter(|(n, _)| !n.contains('.'))
+            .map(|(n, s)| (n.clone(), s.clone()))
+            .collect();
         for (n, sig) in fns {
             if fits(self, &sig.ret) {
                 items.push(Completion {
@@ -2499,7 +2834,12 @@ impl Checker {
             }
         }
         if expected.is_none() {
-            let mut nss: Vec<String> = self.namespaces.iter().filter(|n| !self.hidden_labels.contains_key(*n)).cloned().collect();
+            let mut nss: Vec<String> = self
+                .namespaces
+                .iter()
+                .filter(|n| !self.hidden_labels.contains_key(*n))
+                .cloned()
+                .collect();
             nss.sort();
             for ns in nss {
                 items.push(Completion {
@@ -2530,14 +2870,20 @@ impl Checker {
     fn synth_call(&mut self, name: &str, args: &[Arg], span: Span) -> Ty {
         if let Some(sig) = self.fns.get(name).cloned() {
             if self.cur_index == Some(sig.index) {
-                self.error(span, format!("`{name}` calls itself; recursion is not allowed, so evaluation always terminates"));
+                self.error(
+                    span,
+                    format!("`{name}` calls itself; recursion is not allowed, so evaluation always terminates"),
+                );
                 return Ty::Error;
             }
             let short = name.rsplit('.').next().unwrap_or(name);
             self.hover_def(span, name, Self::fn_sig_text(name, &sig), None, sig.def.clone());
             if short != name {
                 // `lib.f(...)`: the hover/definition also works on `f` alone.
-                let at = Span { line: span.line, col: span.col + (name.len() - short.len()) as u32 };
+                let at = Span {
+                    line: span.line,
+                    col: span.col + (name.len() - short.len()) as u32,
+                };
                 self.hover_def(at, short, Self::fn_sig_text(name, &sig), None, sig.def.clone());
             }
             return self.call_user(name, &sig, args, span);
@@ -2552,7 +2898,10 @@ impl Checker {
             // The failed import was already reported.
         } else {
             let hint = did_you_mean(name, self.fns.keys().map(String::as_str).chain(BUILTINS));
-            self.error(span, format!("unknown function `{name}`{hint} (functions must be declared before use)"));
+            self.error(
+                span,
+                format!("unknown function `{name}`{hint} (functions must be declared before use)"),
+            );
         }
         for a in args {
             self.synth(&a.value);
@@ -2644,12 +2993,11 @@ impl Checker {
             for (e, p) in es.iter().zip(&ps) {
                 self.check(e, p);
             }
-            if name == "matches" {
-                if let ExprKind::Lit(Lit::Str(re)) = &es[1].kind {
-                    if let Err(err) = regex::Regex::new(re) {
-                        self.error(es[1].span, format!("invalid regex: {err}"));
-                    }
-                }
+            if name == "matches"
+                && let ExprKind::Lit(Lit::Str(re)) = &es[1].kind
+                && let Err(err) = regex::Regex::new(re)
+            {
+                self.error(es[1].span, format!("invalid regex: {err}"));
             }
             return ret;
         }
@@ -2728,7 +3076,11 @@ impl Checker {
             if remaining == Ty::Never && st != Ty::Never {
                 self.warn(arm.pat.span, "unreachable match arm: earlier arms cover every case");
             }
-            let target = if remaining == Ty::Never { st.clone() } else { remaining.clone() };
+            let target = if remaining == Ty::Never {
+                st.clone()
+            } else {
+                remaining.clone()
+            };
             let m = self.marks();
             self.bind_pat(&rp, &target, Some(scrut));
             match expected {
@@ -2739,11 +3091,19 @@ impl Checker {
                 }
             }
             self.reset(m);
-            let left: Vec<Ty> = self.ctx.members(&remaining).into_iter().filter(|m| !self.covers(&rp, m)).collect();
+            let left: Vec<Ty> = self
+                .ctx
+                .members(&remaining)
+                .into_iter()
+                .filter(|m| !self.covers(&rp, m))
+                .collect();
             remaining = self.union(left);
         }
         if remaining != Ty::Never && remaining != Ty::Error {
-            self.error(span, format!("non-exhaustive match: values of type `{remaining}` are not covered"));
+            self.error(
+                span,
+                format!("non-exhaustive match: values of type `{remaining}` are not covered"),
+            );
         }
         match expected {
             Some(x) => x.clone(),
@@ -2802,7 +3162,8 @@ impl Checker {
                     self.error(*span, format!("literal `{l}` can never match a value of type `{t}`"));
                 }
                 if let Some(s) = subject.filter(|s| s.is_pure()) {
-                    self.hyps.push(Expr::binary(BinOp::Eq, s.clone(), Expr::lit(l.clone(), *span)));
+                    self.hyps
+                        .push(Expr::binary(BinOp::Eq, s.clone(), Expr::lit(l.clone(), *span)));
                 }
             }
             RPat::Tuple(ps, span) => {
@@ -2834,10 +3195,17 @@ impl Checker {
                 }
             }
             RPat::Record(fps, open, span) => {
-                let cands: Vec<Ty> =
-                    self.ctx.members(t).into_iter().filter(|m| self.record_pat_ok(m, fps, *open)).collect();
+                let cands: Vec<Ty> = self
+                    .ctx
+                    .members(t)
+                    .into_iter()
+                    .filter(|m| self.record_pat_ok(m, fps, *open))
+                    .collect();
                 if cands.is_empty() {
-                    self.error(*span, format!("this record pattern can never match a value of type `{t}`"));
+                    self.error(
+                        *span,
+                        format!("this record pattern can never match a value of type `{t}`"),
+                    );
                 }
                 for (k, fp) in fps {
                     let ft = self.union(cands.iter().map(|m| self.pat_field_ty(m, k)).collect());
@@ -2863,9 +3231,14 @@ impl Checker {
                 fps.iter().all(|(k, fp)| match r.get(k) {
                     Some(f) => self.may_match(fp, &f.read_ty()),
                     None => r.open,
-                }) && (open || r.fields.iter().all(|f| !f.present() || fps.iter().any(|(k, _)| *k == f.name)))
+                }) && (open
+                    || r.fields
+                        .iter()
+                        .all(|f| !f.present() || fps.iter().any(|(k, _)| *k == f.name)))
             }
-            Ty::Map(t) => fps.iter().all(|(_, fp)| self.may_match(fp, &Ty::Union(vec![(*t).clone(), Ty::null()]))),
+            Ty::Map(t) => fps
+                .iter()
+                .all(|(_, fp)| self.may_match(fp, &Ty::Union(vec![(*t).clone(), Ty::null()]))),
             _ => false,
         }
     }
@@ -2898,9 +3271,9 @@ impl Checker {
                 Ty::Record(r) => {
                     (*open || !r.open)
                         && (*open || r.fields.iter().all(|f| fps.iter().any(|(k, _)| *k == f.name)))
-                        && fps.iter().all(|(k, fp)| {
-                            r.get(k).is_some_and(|f| f.present() && self.covers_ty(fp, &f.ty))
-                        })
+                        && fps
+                            .iter()
+                            .all(|(k, fp)| r.get(k).is_some_and(|f| f.present() && self.covers_ty(fp, &f.ty)))
                 }
                 _ => false,
             },
@@ -2923,7 +3296,10 @@ fn merge_records(a: Rec, b: Rec) -> Rec {
             None => fields.push(f),
         }
     }
-    Rec { fields, open: a.open || b.open }
+    Rec {
+        fields,
+        open: a.open || b.open,
+    }
 }
 
 /// Rewrite references to a module's own types (`DeploymentSpec`) to their imported names (`k8s.DeploymentSpec`).
@@ -2952,7 +3328,13 @@ fn qualify(te: &TypeExpr, prefix: &str, locals: &HashSet<&str>) -> TypeExpr {
                 .collect(),
         ),
         TypeKind::Record { fields, open } => TypeKind::Record {
-            fields: fields.iter().map(|f| FieldDecl { ty: q(&f.ty), ..f.clone() }).collect(),
+            fields: fields
+                .iter()
+                .map(|f| FieldDecl {
+                    ty: q(&f.ty),
+                    ..f.clone()
+                })
+                .collect(),
             open: *open,
         },
     };
@@ -2997,7 +3379,11 @@ pub fn value_type(v: &crate::Value) -> Ty {
         V::Obj(es) => Ty::Record(Rec {
             fields: es
                 .iter()
-                .map(|(k, x)| Field { name: k.clone(), ty: value_type(x), presence: Presence::Required })
+                .map(|(k, x)| Field {
+                    name: k.clone(),
+                    ty: value_type(x),
+                    presence: Presence::Required,
+                })
                 .collect(),
             open: false,
         }),

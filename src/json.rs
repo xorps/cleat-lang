@@ -3,7 +3,10 @@
 use crate::eval::Value;
 
 pub fn parse(src: &str) -> Result<Value, String> {
-    let mut p = P { s: src.as_bytes(), i: 0 };
+    let mut p = P {
+        s: src.as_bytes(),
+        i: 0,
+    };
     p.ws();
     let v = p.value()?;
     p.ws();
@@ -118,24 +121,28 @@ impl P<'_> {
             self.i += 1;
         }
         let text = std::str::from_utf8(&self.s[start..self.i]).unwrap();
-        if !float {
-            if let Ok(i) = text.parse::<i64>() {
-                return Ok(Value::Int(i));
-            }
+        if !float && let Ok(i) = text.parse::<i64>() {
+            return Ok(Value::Int(i));
         }
-        text.parse::<f64>().map(Value::Float).map_err(|_| format!("invalid JSON number `{text}`"))
+        text.parse::<f64>()
+            .map(Value::Float)
+            .map_err(|_| format!("invalid JSON number `{text}`"))
     }
 
     fn string(&mut self) -> Result<String, String> {
         self.i += 1; // opening quote
         let mut out: Vec<u8> = Vec::new();
         loop {
-            let Some(&c) = self.s.get(self.i) else { return self.err("closing `\"`") };
+            let Some(&c) = self.s.get(self.i) else {
+                return self.err("closing `\"`");
+            };
             self.i += 1;
             match c {
                 b'"' => break,
                 b'\\' => {
-                    let Some(&e) = self.s.get(self.i) else { return self.err("escape") };
+                    let Some(&e) = self.s.get(self.i) else {
+                        return self.err("escape");
+                    };
                     self.i += 1;
                     match e {
                         b'"' => out.push(b'"'),
@@ -166,8 +173,12 @@ impl P<'_> {
     }
 
     fn hex4(&mut self) -> Result<u32, String> {
-        let h = self.s.get(self.i..self.i + 4).ok_or("invalid JSON: truncated \\u escape")?;
+        let h = self
+            .s
+            .get(self.i..self.i + 4)
+            .ok_or("invalid JSON: truncated \\u escape")?;
         self.i += 4;
-        u32::from_str_radix(std::str::from_utf8(h).unwrap_or(""), 16).map_err(|_| "invalid JSON: bad \\u escape".to_string())
+        u32::from_str_radix(std::str::from_utf8(h).unwrap_or(""), 16)
+            .map_err(|_| "invalid JSON: bad \\u escape".to_string())
     }
 }

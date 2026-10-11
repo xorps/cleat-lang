@@ -36,13 +36,16 @@ pub fn check_source_at(src: &str, base: Option<&Path>) -> Outcome {
 pub fn check_source_in(src: &str, base: Option<&Path>, root: Option<&Path>) -> Outcome {
     match parser::parse_program(src) {
         Ok(items) => check::check_program_in(&items, base, root),
-        Err(e) => Outcome { errors: vec![e], ..Default::default() },
+        Err(e) => Outcome {
+            errors: vec![e],
+            ..Default::default()
+        },
     }
 }
 
 pub enum ExportError {
     /// Static errors: the program was not evaluated.
-    Check(Outcome),
+    Check(Box<Outcome>),
     /// Errors from input decoding or evaluation.
     Eval(Vec<EvalError>),
 }
@@ -69,11 +72,16 @@ pub fn export_in(
 ) -> Result<(Outcome, Vec<Component>), ExportError> {
     let items = match parser::parse_program(src) {
         Ok(items) => items,
-        Err(e) => return Err(ExportError::Check(Outcome { errors: vec![e], ..Default::default() })),
+        Err(e) => {
+            return Err(ExportError::Check(Box::new(Outcome {
+                errors: vec![e],
+                ..Default::default()
+            })));
+        }
     };
     let outcome = check::check_program_in(&items, base, root);
     if !outcome.errors.is_empty() {
-        return Err(ExportError::Check(outcome));
+        return Err(ExportError::Check(Box::new(outcome)));
     }
     let comps = eval::run(&items, outcome.ctx.clone(), base, root, inputs).map_err(ExportError::Eval)?;
     Ok((outcome, comps))
@@ -95,16 +103,23 @@ pub struct InputInfo {
 }
 
 /// The program's inputs, or the check errors if it doesn't check.
-pub fn inputs(src: &str, base: Option<&Path>, root: Option<&Path>) -> Result<Vec<InputInfo>, Outcome> {
-    let items = parser::parse_program(src).map_err(|e| Outcome { errors: vec![e], ..Default::default() })?;
+pub fn inputs(src: &str, base: Option<&Path>, root: Option<&Path>) -> Result<Vec<InputInfo>, Box<Outcome>> {
+    let items = parser::parse_program(src).map_err(|e| {
+        Box::new(Outcome {
+            errors: vec![e],
+            ..Default::default()
+        })
+    })?;
     let outcome = check::check_program_in(&items, base, root);
     if !outcome.errors.is_empty() {
-        return Err(outcome);
+        return Err(Box::new(outcome));
     }
     let mut ctx = outcome.ctx.clone();
     let mut out = Vec::new();
     for item in &items {
-        let ast::Item::Input { name, ty, default, .. } = item else { continue };
+        let ast::Item::Input { name, ty, default, .. } = item else {
+            continue;
+        };
         let t = ctx.resolve(ty);
         let definition = match &t {
             types::Ty::Alias(_) => Some(ctx.unfold(&t).to_string()),

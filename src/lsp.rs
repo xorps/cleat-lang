@@ -41,12 +41,18 @@ pub fn run() -> io::Result<()> {
                     ("definitionProvider", Value::Bool(true)),
                     (
                         "completionProvider",
-                        obj(vec![("triggerCharacters", Value::List(vec![s("."), s("\""), s("{"), s(",")]))]),
+                        obj(vec![(
+                            "triggerCharacters",
+                            Value::List(vec![s("."), s("\""), s("{"), s(",")]),
+                        )]),
                     ),
                 ]);
                 let result = obj(vec![
                     ("capabilities", caps),
-                    ("serverInfo", obj(vec![("name", s("cleat")), ("version", s(env!("CARGO_PKG_VERSION")))])),
+                    (
+                        "serverInfo",
+                        obj(vec![("name", s("cleat")), ("version", s(env!("CARGO_PKG_VERSION")))]),
+                    ),
                 ]);
                 respond(&mut out, id, result)?;
             }
@@ -58,10 +64,10 @@ pub fn run() -> io::Result<()> {
             }
             "textDocument/didChange" => {
                 // Full sync: the last change holds the whole document.
-                if let Some(Value::List(changes)) = params.get("contentChanges") {
-                    if let Some(Value::Str(text)) = changes.last().and_then(|c| c.get("text")) {
-                        changed(&mut out, &mut docs, uri(), text.clone())?;
-                    }
+                if let Some(Value::List(changes)) = params.get("contentChanges")
+                    && let Some(Value::Str(text)) = changes.last().and_then(|c| c.get("text"))
+                {
+                    changed(&mut out, &mut docs, uri(), text.clone())?;
                 }
             }
             "textDocument/didClose" => {
@@ -74,11 +80,17 @@ pub fn run() -> io::Result<()> {
                 recheck_others(&mut out, &mut docs, &u)?;
             }
             "textDocument/completion" => {
-                let result = docs.get(&uri()).and_then(|d| completion(&uri(), d, &params)).unwrap_or(Value::Null);
+                let result = docs
+                    .get(&uri())
+                    .and_then(|d| completion(&uri(), d, &params))
+                    .unwrap_or(Value::Null);
                 respond(&mut out, id, result)?;
             }
             "textDocument/definition" => {
-                let result = docs.get(&uri()).and_then(|d| definition(&uri(), d, &params)).unwrap_or(Value::Null);
+                let result = docs
+                    .get(&uri())
+                    .and_then(|d| definition(&uri(), d, &params))
+                    .unwrap_or(Value::Null);
                 respond(&mut out, id, result)?;
             }
             "textDocument/hover" => {
@@ -86,8 +98,14 @@ pub fn run() -> io::Result<()> {
                 respond(&mut out, id, result)?;
             }
             _ if id.is_some() => {
-                let err = obj(vec![("code", Value::Int(-32601)), ("message", s(&format!("unsupported: {method}")))]);
-                send(&mut out, &obj(vec![("jsonrpc", s("2.0")), ("id", id.unwrap()), ("error", err)]))?;
+                let err = obj(vec![
+                    ("code", Value::Int(-32601)),
+                    ("message", s(&format!("unsupported: {method}"))),
+                ]);
+                send(
+                    &mut out,
+                    &obj(vec![("jsonrpc", s("2.0")), ("id", id.unwrap()), ("error", err)]),
+                )?;
             }
             _ => {} // other notifications
         }
@@ -106,8 +124,11 @@ fn changed(out: &mut impl Write, docs: &mut HashMap<String, Doc>, uri: String, t
 }
 
 fn recheck_others(out: &mut impl Write, docs: &mut HashMap<String, Doc>, except: &str) -> io::Result<()> {
-    let others: Vec<(String, String)> =
-        docs.iter().filter(|(u, _)| u.as_str() != except).map(|(u, d)| (u.clone(), d.text.clone())).collect();
+    let others: Vec<(String, String)> = docs
+        .iter()
+        .filter(|(u, _)| u.as_str() != except)
+        .map(|(u, d)| (u.clone(), d.text.clone()))
+        .collect();
     for (u, text) in others {
         update(out, docs, u, text)?;
     }
@@ -118,7 +139,9 @@ fn update(out: &mut impl Write, docs: &mut HashMap<String, Doc>, uri: String, te
     let path = uri_to_path(&uri);
     let base = path.as_ref().and_then(|p| p.parent().map(Path::to_path_buf));
     let root = path.as_deref().and_then(crate::modules::find_root);
-    let result = catch_unwind(AssertUnwindSafe(|| check_source_in(&text, base.as_deref(), root.as_deref())));
+    let result = catch_unwind(AssertUnwindSafe(|| {
+        check_source_in(&text, base.as_deref(), root.as_deref())
+    }));
     let (diags, hovers) = match result {
         Ok(outcome) => {
             let mut d = diagnostics(&text, &outcome);
@@ -128,12 +151,21 @@ fn update(out: &mut impl Write, docs: &mut HashMap<String, Doc>, uri: String, te
             (d, outcome.hovers)
         }
         Err(_) => {
-            let d = diagnostic(&text, Span { line: 1, col: 1 }, 1, "internal error in the cleat checker (please report)");
+            let d = diagnostic(
+                &text,
+                Span { line: 1, col: 1 },
+                1,
+                "internal error in the cleat checker (please report)",
+            );
             (vec![d], Vec::new())
         }
     };
     // Keep the previous hovers while the file doesn't parse.
-    let hovers = if hovers.is_empty() { docs.get(&uri).map(|d| d.hovers.clone()).unwrap_or_default() } else { hovers };
+    let hovers = if hovers.is_empty() {
+        docs.get(&uri).map(|d| d.hovers.clone()).unwrap_or_default()
+    } else {
+        hovers
+    };
     publish(out, &uri, diags)?;
     docs.insert(uri, Doc { text, hovers });
     Ok(())
@@ -149,8 +181,13 @@ fn diagnostics(text: &str, o: &Outcome) -> Vec<Value> {
 /// errors that depend on those inputs (at the call site in this file).
 fn runtime_diagnostics(uri: &str, text: &str) -> Vec<Value> {
     let Some(path) = uri_to_path(uri) else { return vec![] };
-    let Some(inputs_file) = crate::inputs_file_for(&path) else { return vec![] };
-    let name = inputs_file.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+    let Some(inputs_file) = crate::inputs_file_for(&path) else {
+        return vec![];
+    };
+    let name = inputs_file
+        .file_name()
+        .map(|n| n.to_string_lossy().to_string())
+        .unwrap_or_default();
     let inputs = match crate::read_inputs_file(&inputs_file) {
         Ok(i) => i,
         Err(e) => return vec![diagnostic(text, Span { line: 1, col: 1 }, 2, &e)],
@@ -184,7 +221,11 @@ fn publish(out: &mut impl Write, uri: &str, diags: Vec<Value>) -> io::Result<()>
     let params = obj(vec![("uri", s(uri)), ("diagnostics", Value::List(diags))]);
     send(
         out,
-        &obj(vec![("jsonrpc", s("2.0")), ("method", s("textDocument/publishDiagnostics")), ("params", params)]),
+        &obj(vec![
+            ("jsonrpc", s("2.0")),
+            ("method", s("textDocument/publishDiagnostics")),
+            ("params", params),
+        ]),
     )
 }
 
@@ -207,7 +248,10 @@ fn hover(doc: &Doc, params: &Value) -> Option<Value> {
         md.push_str(doc);
     }
     let contents = obj(vec![("kind", s("markdown")), ("value", s(&md))]);
-    Some(obj(vec![("contents", contents), ("range", range(&doc.text, h.span, h.len))]))
+    Some(obj(vec![
+        ("contents", contents),
+        ("range", range(&doc.text, h.span, h.len)),
+    ]))
 }
 
 /// The document's directory and project root, for resolving imports.
@@ -233,12 +277,19 @@ fn completion(uri: &str, doc: &Doc, params: &Value) -> Option<Value> {
     let (line, col) = position(doc, params)?;
     let (base, root) = dirs(uri);
     let text = doc.text.clone();
-    let c = catch_unwind(AssertUnwindSafe(|| crate::complete::complete(&text, line, col, base.as_deref(), root.as_deref())))
-        .ok()??;
+    let c = catch_unwind(AssertUnwindSafe(|| {
+        crate::complete::complete(&text, line, col, base.as_deref(), root.as_deref())
+    }))
+    .ok()??;
     let line_text = doc.text.lines().nth(line).unwrap_or("");
     let start = col_to_utf16(line_text, col.saturating_sub(c.replace_len));
     let end = col_to_utf16(line_text, col);
-    let pos = |ch: usize| obj(vec![("line", Value::Int(line as i64)), ("character", Value::Int(ch as i64))]);
+    let pos = |ch: usize| {
+        obj(vec![
+            ("line", Value::Int(line as i64)),
+            ("character", Value::Int(ch as i64)),
+        ])
+    };
     let range = obj(vec![("start", pos(start)), ("end", pos(end))]);
     let items: Vec<Value> = c
         .items
@@ -259,7 +310,10 @@ fn completion(uri: &str, doc: &Doc, params: &Value) -> Option<Value> {
                 ("kind", Value::Int(kind)),
                 ("sortText", s(&format!("{i:05}"))),
                 ("filterText", s(&item.label)),
-                ("textEdit", obj(vec![("range", range.clone()), ("newText", s(&item.insert))])),
+                (
+                    "textEdit",
+                    obj(vec![("range", range.clone()), ("newText", s(&item.insert))]),
+                ),
             ];
             if let Some(d) = &item.detail {
                 fields.push(("detail", s(d)));
@@ -270,7 +324,10 @@ fn completion(uri: &str, doc: &Doc, params: &Value) -> Option<Value> {
             obj(fields)
         })
         .collect();
-    Some(obj(vec![("isIncomplete", Value::Bool(false)), ("items", Value::List(items))]))
+    Some(obj(vec![
+        ("isIncomplete", Value::Bool(false)),
+        ("items", Value::List(items)),
+    ]))
 }
 
 fn definition(uri: &str, doc: &Doc, params: &Value) -> Option<Value> {
@@ -290,7 +347,10 @@ fn definition(uri: &str, doc: &Doc, params: &Value) -> Option<Value> {
         None => crate::complete::definition(&doc.text, line, col, base.as_deref(), root.as_deref())?,
     };
     let (target_uri, text) = match file {
-        Some(p) => (format!("file://{}", p.display()), std::fs::read_to_string(&p).unwrap_or_default()),
+        Some(p) => (
+            format!("file://{}", p.display()),
+            std::fs::read_to_string(&p).unwrap_or_default(),
+        ),
         None => (uri.to_string(), doc.text.clone()),
     };
     Some(obj(vec![("uri", s(&target_uri)), ("range", range(&text, span, 0))]))
@@ -326,13 +386,20 @@ fn utf16_to_col(line: &str, units: usize) -> u32 {
 
 /// Length of the token starting at `span`, so diagnostics underline a whole word.
 fn token_len(text: &str, span: Span) -> usize {
-    let Some(line) = text.lines().nth(span.line.saturating_sub(1) as usize) else { return 1 };
+    let Some(line) = text.lines().nth(span.line.saturating_sub(1) as usize) else {
+        return 1;
+    };
     let rest: Vec<char> = line.chars().skip(span.col.saturating_sub(1) as usize).collect();
     match rest.first() {
-        Some(c) if c.is_alphanumeric() || *c == '_' => {
-            rest.iter().take_while(|c| c.is_alphanumeric() || **c == '_' || **c == '.').count()
-        }
-        Some('"') => rest.iter().skip(1).position(|c| *c == '"').map_or(rest.len(), |i| i + 2),
+        Some(c) if c.is_alphanumeric() || *c == '_' => rest
+            .iter()
+            .take_while(|c| c.is_alphanumeric() || **c == '_' || **c == '.')
+            .count(),
+        Some('"') => rest
+            .iter()
+            .skip(1)
+            .position(|c| *c == '"')
+            .map_or(rest.len(), |i| i + 2),
         Some(_) => 1,
         None => 1,
     }
@@ -358,7 +425,9 @@ fn read_message(r: &mut impl BufRead) -> io::Result<Option<Value>> {
     let len = len.ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "missing Content-Length"))?;
     let mut buf = vec![0; len];
     r.read_exact(&mut buf)?;
-    json::parse(&String::from_utf8_lossy(&buf)).map(Some).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
+    json::parse(&String::from_utf8_lossy(&buf))
+        .map(Some)
+        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
 }
 
 fn send(w: &mut impl Write, v: &Value) -> io::Result<()> {
@@ -368,7 +437,14 @@ fn send(w: &mut impl Write, v: &Value) -> io::Result<()> {
 }
 
 fn respond(w: &mut impl Write, id: Option<Value>, result: Value) -> io::Result<()> {
-    send(w, &obj(vec![("jsonrpc", s("2.0")), ("id", id.unwrap_or(Value::Null)), ("result", result)]))
+    send(
+        w,
+        &obj(vec![
+            ("jsonrpc", s("2.0")),
+            ("id", id.unwrap_or(Value::Null)),
+            ("result", result),
+        ]),
+    )
 }
 
 fn obj(pairs: Vec<(&str, Value)>) -> Value {
@@ -397,12 +473,13 @@ fn uri_to_path(uri: &str) -> Option<PathBuf> {
     let mut out = Vec::with_capacity(bytes.len());
     let mut i = 0;
     while i < bytes.len() {
-        if bytes[i] == b'%' && i + 2 < bytes.len() {
-            if let Ok(b) = u8::from_str_radix(std::str::from_utf8(&bytes[i + 1..i + 3]).ok()?, 16) {
-                out.push(b);
-                i += 3;
-                continue;
-            }
+        if bytes[i] == b'%'
+            && i + 2 < bytes.len()
+            && let Ok(b) = u8::from_str_radix(std::str::from_utf8(&bytes[i + 1..i + 3]).ok()?, 16)
+        {
+            out.push(b);
+            i += 3;
+            continue;
         }
         out.push(bytes[i]);
         i += 1;

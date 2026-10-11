@@ -37,7 +37,11 @@ impl fmt::Display for Vc {
             VcStatus::Refuted => "REFUTED",
             VcStatus::Runtime => "runtime",
         };
-        writeln!(f, "[{tag}] in `{}` at {}: required by {}", self.func, self.span, self.reason)?;
+        writeln!(
+            f,
+            "[{tag}] in `{}` at {}: required by {}",
+            self.func, self.span, self.reason
+        )?;
         for h in &self.hyps {
             writeln!(f, "      {h}")?;
         }

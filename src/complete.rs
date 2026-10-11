@@ -21,7 +21,12 @@ pub struct Completions {
 enum Frame {
     /// An open bracket at an offset; whether a `:` and a `=>` were seen since the last `,`
     /// (object keys vs values; `match` patterns vs arm bodies).
-    Bracket { ch: char, colon: bool, arrow: bool, at: usize },
+    Bracket {
+        ch: char,
+        colon: bool,
+        arrow: bool,
+        at: usize,
+    },
     /// `\(` inside a string; `triple` for `"""` strings.
     Interp(bool),
 }
@@ -63,14 +68,25 @@ fn scan(cs: &[char]) -> Scan {
         match c {
             '/' if cs.get(i + 1) == Some(&'/') => match cs[i..].iter().position(|&c| c == '\n') {
                 Some(n) => i += n,
-                None => return Scan { frames, string, in_comment: true },
+                None => {
+                    return Scan {
+                        frames,
+                        string,
+                        in_comment: true,
+                    };
+                }
             },
             '"' if starts(i, "\"\"\"") => {
                 string = Some((true, i));
                 i += 2;
             }
             '"' => string = Some((false, i)),
-            '{' | '[' | '(' => frames.push(Frame::Bracket { ch: c, colon: false, arrow: false, at: i }),
+            '{' | '[' | '(' => frames.push(Frame::Bracket {
+                ch: c,
+                colon: false,
+                arrow: false,
+                at: i,
+            }),
             '}' | ']' => {
                 if matches!(frames.last(), Some(Frame::Bracket { .. })) {
                     frames.pop();
@@ -100,7 +116,11 @@ fn scan(cs: &[char]) -> Scan {
         }
         i += 1;
     }
-    Scan { frames, string, in_comment: false }
+    Scan {
+        frames,
+        string,
+        in_comment: false,
+    }
 }
 
 /// Close everything that is open at the end of `probe`.
@@ -219,12 +239,21 @@ pub fn complete(src: &str, line: usize, col: usize, base: Option<&Path>, root: O
         let prev = before[..w].iter().rev().find(|c| !c.is_whitespace()).copied();
         // A word alone at the start of a line after a finished value (no comma typed yet)
         // starts a new key: `{ a: 1⏎ ‸`.
-        let starts_line = before[..w].iter().rev().take_while(|c| **c != '\n').all(|c| c.is_whitespace())
+        let starts_line = before[..w]
+            .iter()
+            .rev()
+            .take_while(|c| **c != '\n')
+            .all(|c| c.is_whitespace())
             && before[..w].contains(&'\n');
         let value_ended = prev.is_some_and(|c| !"{[(,:=+-*/%<>!&|?".contains(c));
         // `match e {`: is the cursor in a pattern (no `=>` yet in this arm)?
         let in_match_pattern = match sc.frames.last() {
-            Some(Frame::Bracket { ch: '{', arrow: false, at, .. }) => {
+            Some(Frame::Bracket {
+                ch: '{',
+                arrow: false,
+                at,
+                ..
+            }) => {
                 let head: String = before[..*at].iter().collect();
                 head.rfind("match").is_some_and(|m| {
                     let after = &head[m + 5..];
@@ -236,8 +265,12 @@ pub fn complete(src: &str, line: usize, col: usize, base: Option<&Path>, root: O
         };
         let key_position = !in_match_pattern
             && match sc.frames.last() {
-                Some(Frame::Bracket { ch: '{', colon: false, .. }) => true,
-                Some(Frame::Bracket { ch: '{', colon: true, .. }) => starts_line && value_ended && !after_dot,
+                Some(Frame::Bracket {
+                    ch: '{', colon: false, ..
+                }) => true,
+                Some(Frame::Bracket {
+                    ch: '{', colon: true, ..
+                }) => starts_line && value_ended && !after_dot,
                 _ => false,
             };
         let head = text(0, w);
@@ -251,7 +284,11 @@ pub fn complete(src: &str, line: usize, col: usize, base: Option<&Path>, root: O
         } else if key_position && prev == Some('-') {
             format!("{head}{COMPLETE_NAME}") // `-path` in a patch
         } else if key_position {
-            let sep = if after_dot || matches!(prev, Some('{' | ',')) { "" } else { ", " };
+            let sep = if after_dot || matches!(prev, Some('{' | ',')) {
+                ""
+            } else {
+                ", "
+            };
             format!("{head}{sep}{COMPLETE_NAME}: null")
         } else if after_dot {
             format!("{head}{COMPLETE_NAME}")
@@ -268,13 +305,19 @@ pub fn complete(src: &str, line: usize, col: usize, base: Option<&Path>, root: O
     };
     // The probe ends at the cursor; leave out keys the object sets further down.
     items.retain(|i| !(i.insert.ends_with(": ") && set_below.contains(&i.label)));
-    items.sort_by(|a, b| b.preferred.cmp(&a.preferred));
+    items.sort_by_key(|i| !i.preferred);
     Some(Completions { items, replace_len })
 }
 
 /// Where the name at a 0-based (line, character) position is defined:
 /// `(None, span)` in this file, or `(Some(file), span)` in another.
-pub fn definition(src: &str, line: usize, col: usize, base: Option<&Path>, root: Option<&Path>) -> Option<(Option<PathBuf>, Span)> {
+pub fn definition(
+    src: &str,
+    line: usize,
+    col: usize,
+    base: Option<&Path>,
+    root: Option<&Path>,
+) -> Option<(Option<PathBuf>, Span)> {
     let cs: Vec<char> = src.chars().collect();
     let cur = offset(&cs, line, col);
     let items = parser::parse_program(src).ok()?;
@@ -283,11 +326,15 @@ pub fn definition(src: &str, line: usize, col: usize, base: Option<&Path>, root:
     // On an import's path: open that file.
     let line_text: String = src.lines().nth(line)?.to_string();
     if line_text.trim_start().starts_with("import") {
-        let quote_spans: Vec<usize> = line_text.char_indices().filter(|(_, c)| *c == '"').map(|(i, _)| i).collect();
-        if let [a, b, ..] = quote_spans.as_slice() {
-            if (*a..=*b).contains(&col) {
-                return Some((Some(resolve(&line_text[a + 1..*b])?), Span { line: 1, col: 1 }));
-            }
+        let quote_spans: Vec<usize> = line_text
+            .char_indices()
+            .filter(|(_, c)| *c == '"')
+            .map(|(i, _)| i)
+            .collect();
+        if let [a, b, ..] = quote_spans.as_slice()
+            && (*a..=*b).contains(&col)
+        {
+            return Some((Some(resolve(&line_text[a + 1..*b])?), Span { line: 1, col: 1 }));
         }
     }
 
@@ -312,13 +359,15 @@ pub fn definition(src: &str, line: usize, col: usize, base: Option<&Path>, root:
             Item::Type { name, span, .. }
             | Item::Input { name, span, .. }
             | Item::Let { name, span, .. }
-            | Item::Export { name: Some(name), span, .. }
-                if name == n =>
-            {
-                Some(*span)
-            }
+            | Item::Export {
+                name: Some(name), span, ..
+            } if name == n => Some(*span),
             Item::Fn(f) if f.name == n => Some(f.span),
-            Item::Import { form: ImportForm::Default(x), span, .. } if x == n => Some(*span),
+            Item::Import {
+                form: ImportForm::Default(x),
+                span,
+                ..
+            } if x == n => Some(*span),
             _ => None,
         })
     };
@@ -334,11 +383,25 @@ pub fn definition(src: &str, line: usize, col: usize, base: Option<&Path>, root:
     for it in &items {
         match it {
             // `ns.x` where `ns` is a namespace import of a Cleat module.
-            Item::Import { form: ImportForm::Namespace(ns), path, span, .. } if segs[0] == ns => {
-                return if segs.len() > 1 { in_module(path, segs[1]) } else { Some((None, *span)) };
+            Item::Import {
+                form: ImportForm::Namespace(ns),
+                path,
+                span,
+                ..
+            } if segs[0] == ns => {
+                return if segs.len() > 1 {
+                    in_module(path, segs[1])
+                } else {
+                    Some((None, *span))
+                };
             }
             // A name brought in by `import { orig as local }`.
-            Item::Import { form: ImportForm::Named(names), path, span, .. } => {
+            Item::Import {
+                form: ImportForm::Named(names),
+                path,
+                span,
+                ..
+            } => {
                 if let Some((orig, _, _)) = names.iter().find(|(_, local, _)| local == segs[0]) {
                     return in_module(path, orig).or(Some((None, *span)));
                 }

@@ -114,10 +114,10 @@ pub fn load(path: &Path) -> Result<Arc<Module>, String> {
     if st == Stamp::Missing {
         return Err(format!("cannot read `{}`: No such file or directory", path.display()));
     }
-    if let Some((t, m)) = cache().lock().unwrap().get(&canon(path)) {
-        if *t == st {
-            return Ok(m.clone());
-        }
+    if let Some((t, m)) = cache().lock().unwrap().get(&canon(path))
+        && *t == st
+    {
+        return Ok(m.clone());
     }
     let module = Arc::new(load_uncached(path)?);
     cache().lock().unwrap().insert(canon(path), (st, module.clone()));
@@ -132,9 +132,14 @@ pub fn generate_source(path: &Path) -> Result<String, String> {
 fn read_docs(path: &Path) -> Result<Vec<crate::Value>, String> {
     let text = read_source(path)?;
     match path.extension().and_then(|e| e.to_str()) {
-        Some("json") => Ok(vec![json::parse(&text).map_err(|e| format!("`{}`: {e}", path.display()))?]),
+        Some("json") => Ok(vec![
+            json::parse(&text).map_err(|e| format!("`{}`: {e}", path.display()))?,
+        ]),
         Some("yaml" | "yml") => yaml::parse_docs(&text).map_err(|e| format!("`{}`: {e}", path.display())),
-        _ => Err(format!("cannot import `{}`: expected a .cleat, .json, .yaml or .yml file", path.display())),
+        _ => Err(format!(
+            "cannot import `{}`: expected a .cleat, .json, .yaml or .yml file",
+            path.display()
+        )),
     }
 }
 
@@ -146,8 +151,7 @@ fn load_uncached(path: &Path) -> Result<Module, String> {
         let generated = openapi::generate(&read_docs(path)?).map_err(|e| format!("`{}`: {e}", path.display()))?;
         (generated.source, generated.docs)
     };
-    let items = parser::parse_program(&source)
-        .map_err(|d| format!("`{}`:{}: {}", path.display(), d.span, d.msg))?;
+    let items = parser::parse_program(&source).map_err(|d| format!("`{}`:{}: {}", path.display(), d.span, d.msg))?;
     for item in &items {
         match item {
             Item::Input { .. } => {
@@ -165,8 +169,17 @@ fn load_uncached(path: &Path) -> Result<Module, String> {
             _ => {}
         }
     }
-    let generated = if is_source { None } else { write_generated(path, &source) };
-    Ok(Module { items, docs, is_source, generated })
+    let generated = if is_source {
+        None
+    } else {
+        write_generated(path, &source)
+    };
+    Ok(Module {
+        items,
+        docs,
+        is_source,
+        generated,
+    })
 }
 
 /// The value of `import x from "path" with { type: kind }`.
@@ -179,9 +192,15 @@ pub fn load_data(path: &Path, kind: &str) -> Result<crate::Value, String> {
         "json" => json::parse(&text).map_err(at),
         "yaml" => {
             let mut docs = yaml::parse_docs(&text).map_err(at)?;
-            Ok(if docs.len() == 1 { docs.pop().unwrap() } else { crate::Value::List(docs) })
+            Ok(if docs.len() == 1 {
+                docs.pop().unwrap()
+            } else {
+                crate::Value::List(docs)
+            })
         }
-        other => Err(format!("unsupported import type `{other}` (expected \"json\", \"yaml\" or \"text\")")),
+        other => Err(format!(
+            "unsupported import type `{other}` (expected \"json\", \"yaml\" or \"text\")"
+        )),
     }
 }
 
@@ -190,7 +209,10 @@ pub fn load_data(path: &Path, kind: &str) -> Result<crate::Value, String> {
 pub fn hidden_namespace(path: &str, taken: impl Fn(&str) -> bool) -> String {
     let file = Path::new(path).file_name().and_then(|f| f.to_str()).unwrap_or("module");
     let stem = file.rsplit_once('.').map_or(file, |(stem, _ext)| stem);
-    let mut base: String = stem.chars().map(|c| if c.is_ascii_alphanumeric() { c } else { '_' }).collect();
+    let mut base: String = stem
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
+        .collect();
     if base.is_empty() || base.starts_with(|c: char| c.is_ascii_digit()) {
         base.insert(0, '_');
     }
@@ -212,7 +234,9 @@ pub fn resolve_import(base: Option<&Path>, root: Option<&Path>, path: &str) -> R
     };
     let Some(root) = root else { return Ok(full) };
     let canon = full.canonicalize().map_err(|e| format!("cannot read `{path}`: {e}"))?;
-    let root = root.canonicalize().map_err(|e| format!("project root `{}`: {e}", root.display()))?;
+    let root = root
+        .canonicalize()
+        .map_err(|e| format!("project root `{}`: {e}", root.display()))?;
     if canon.starts_with(&root) {
         Ok(canon)
     } else {
@@ -227,7 +251,10 @@ pub fn resolve_import(base: Option<&Path>, root: Option<&Path>, path: &str) -> R
 /// directory containing `.git`, else the file's own directory.
 pub fn find_root(file: &Path) -> Option<PathBuf> {
     let dir = file.canonicalize().ok()?.parent()?.to_path_buf();
-    dir.ancestors().find(|d| d.join(".git").exists()).map(Path::to_path_buf).or(Some(dir))
+    dir.ancestors()
+        .find(|d| d.join(".git").exists())
+        .map(Path::to_path_buf)
+        .or(Some(dir))
 }
 
 /// Save a schema's generated Cleat source where editors can open it (go to definition).
@@ -236,7 +263,13 @@ fn write_generated(schema: &Path, source: &str) -> Option<PathBuf> {
         .display()
         .to_string()
         .chars()
-        .map(|c| if c.is_ascii_alphanumeric() || c == '.' || c == '-' { c } else { '_' })
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '.' || c == '-' {
+                c
+            } else {
+                '_'
+            }
+        })
         .collect();
     let dir = std::env::temp_dir().join("cleat-generated");
     std::fs::create_dir_all(&dir).ok()?;
