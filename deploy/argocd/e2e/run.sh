@@ -1,7 +1,7 @@
 #!/bin/sh
 # End-to-end test of the Cleat Argo CD plugin on a throwaway kind cluster.
 #
-#   deploy/argocd/e2e/run.sh            # create cluster, install, sync, verify
+#   deploy/argocd/e2e/run.sh            # create a fresh cluster, install, sync, verify
 #   deploy/argocd/e2e/run.sh cleanup    # delete the cluster
 #
 # Needs docker and kubectl. Downloads a pinned kind (checksum-verified) and
@@ -46,7 +46,14 @@ if [ "${1:-}" = cleanup ]; then
 fi
 
 echo "==> cluster"
-"$KIND" get clusters | grep -qx "$CLUSTER" || "$KIND" create cluster --name "$CLUSTER" --wait 120s
+# Always a fresh cluster: a leftover one keeps the previous run's Application
+# settings, and its pods aren't restarted onto rebuilt images (same tags), so
+# the test would check stale code.
+if "$KIND" get clusters | grep -qx "$CLUSTER"; then
+  echo "deleting the cluster left by a previous run"
+  "$KIND" delete cluster --name "$CLUSTER"
+fi
+"$KIND" create cluster --name "$CLUSTER" --wait 120s
 
 echo "==> Argo CD $ARGOCD_VERSION"
 k get namespace argocd >/dev/null 2>&1 || k create namespace argocd
