@@ -1,0 +1,38 @@
+// Cleat's values are JSON; its types are TypeScript-like and structural.
+// Edit anything: errors, hovers and completion update as you type.
+
+type Env  = "dev" | "staging" | "prod"
+type Port = Int where 1 <= self && self <= 65535
+
+type Service = {
+  name: Str,
+  port: Port,
+  replicas: Int where self >= 1,
+  endpoints: [Str],
+  labels?: { [Str]: Str },
+}
+
+input env: Env = "dev"
+input port: Port = 8080
+input regions: [Str] = ["eu-west-1"]
+
+// Functions can't recurse, so evaluation always terminates.
+fn replicas(e: Env) -> Int = match e {
+  "prod" => 3,
+  "staging" => 2,
+  "dev" => 1,
+}
+
+let service: Service = {
+  name: "api",
+  port,
+  replicas: replicas(env),
+  endpoints: [for r in regions => "https://api.\(r).example.com:\(port)"],
+}
+
+// Patches are checked against the declared type: a misspelled field is an
+// error, not a no-op.
+export service with {
+  replicas: if env == "prod" then 5 else replicas(env),
+  labels: { env },
+}

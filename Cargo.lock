@@ -30,6 +30,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "cleat-wasm"
+version = "0.1.0"
+dependencies = [
+ "cleat-core",
+]
+
+[[package]]
 name = "core_detect"
 version = "1.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"

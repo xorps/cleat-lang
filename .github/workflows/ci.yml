@@ -32,6 +32,12 @@ jobs:
         run: |
           rustup target add thumbv7em-none-eabihf
           cargo clippy -p cleat-core --locked --target thumbv7em-none-eabihf -- -D warnings
+      - name: Lint the playground's WebAssembly crate
+        run: |
+          rustup target add wasm32-unknown-unknown
+          cargo clippy -p cleat-wasm --locked --target wasm32-unknown-unknown -- -D warnings
+      - name: Check the playground script
+        run: node --check site/playground/playground.js
       - name: Check examples
         run: |
           cargo run -q -- check examples/quickstart.cleat
