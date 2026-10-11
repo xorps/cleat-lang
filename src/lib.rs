@@ -126,3 +126,31 @@ pub fn inputs(src: &str, base: Option<&Path>, root: Option<&Path>) -> Result<Vec
     }
     Ok(out)
 }
+
+/// Inputs from a JSON or YAML file holding an object of input values.
+pub fn read_inputs_file(path: &Path) -> Result<Vec<(String, InputValue)>, String> {
+    let shown = path.display();
+    let text = std::fs::read_to_string(path).map_err(|e| format!("cannot read {shown}: {e}"))?;
+    let is_yaml = matches!(path.extension().and_then(|e| e.to_str()), Some("yaml" | "yml"));
+    let value = if is_yaml {
+        match yaml::parse_docs(&text).map_err(|e| format!("{shown}: {e}"))?.as_slice() {
+            [v] => v.clone(),
+            _ => return Err(format!("{shown}: expected exactly one YAML document")),
+        }
+    } else {
+        json::parse(&text).map_err(|e| format!("{shown}: {e}"))?
+    };
+    match value {
+        Value::Obj(es) => Ok(es.into_iter().map(|(k, v)| (k, InputValue::Json(v))).collect()),
+        _ => Err(format!("{shown}: inputs must be an object")),
+    }
+}
+
+/// The inputs file that goes with an entry file: `app.inputs.json` or `app.inputs.yaml` next to `app.cleat`.
+pub fn inputs_file_for(file: &Path) -> Option<std::path::PathBuf> {
+    let stem = file.file_stem()?.to_str()?;
+    ["json", "yaml", "yml"]
+        .iter()
+        .map(|ext| file.with_file_name(format!("{stem}.inputs.{ext}")))
+        .find(|p| p.exists())
+}

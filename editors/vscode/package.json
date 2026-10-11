@@ -61,7 +61,7 @@
           "type": "array",
           "items": { "type": "string" },
           "default": [],
-          "description": "Extra arguments for `cleat export` in the output preview, e.g. [\"--set\", \"env=dev\", \"--target\", \"argocd\"]. A `<file>.inputs.json` next to the file is passed as --input automatically."
+          "description": "Extra arguments for `cleat export` in the output preview, e.g. [\"--set\", \"env=dev\", \"--target\", \"argocd\"]. A `<file>.inputs.json` (or .yaml) next to the file is passed as --input automatically, and the language server also evaluates with it to report input-dependent errors."
         }
       }
     }

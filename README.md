@@ -105,9 +105,17 @@ checks parameters, patches, sync waves and their order, and error reporting.
   CRD types, with their docs; keys already set are left out, required ones
   come first), field names after `.`, members of imported modules, `with`
   patch paths, and values (enum literals, variables and functions that fit);
-- hover for types, fields and functions, with OpenAPI descriptions;
-- go to definition for functions, constants, types, imported module members
-  and import paths.
+- completion of type names (including `k8s.` namespaces), type-level `with`
+  paths, and `match` arms (literals, and `{ kind: "Service", .. }` shapes for
+  discriminated unions);
+- hover for types, fields, functions and bindings, with OpenAPI descriptions;
+- go to definition for variables (including parameters, loop and pattern
+  variables), functions, types (Kubernetes and CRD types open the generated
+  type source), imported module members and import paths;
+- unsaved edits to imported files are seen immediately, and every open file
+  is re-checked when something it imports changes;
+- with a `<file>.inputs.json` (or `.yaml`) next to the file, errors that only
+  show up for those inputs are reported inline too.
 
 For VS Code (no npm needed):
 
@@ -117,9 +125,10 @@ editors/vscode/package.sh
 code --install-extension editors/vscode/cleat.vsix --force
 ```
 
-The extension uses `target/debug/cleat` from the open workspace, or
-`cleat.serverPath`. **Cleat: Show Output** (the preview icon in the editor
-title bar) opens the exported YAML beside the file and refreshes on save.
+The extension uses the newest of `target/debug/cleat` and
+`target/release/cleat` in the open workspace, or `cleat.serverPath`.
+**Cleat: Show Output** (the preview icon in the editor title bar) opens the
+exported YAML beside the file and updates as you type.
 Inputs come from `<file>.inputs.json` next to the file and the
 `cleat.exportArgs` setting.
 

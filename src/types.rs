@@ -249,6 +249,10 @@ pub struct TypeCtx {
     pub alias_src: HashMap<String, TypeExpr>,
     pub aliases: HashMap<String, Ty>,
     resolving: Vec<String>,
+    /// Set when resolution meets the completion placeholder (see `complete.rs`).
+    pub completion: Option<TypeCompletion>,
+    /// Where each alias is defined (for go-to-definition).
+    pub alias_defs: HashMap<String, crate::check::DefSite>,
     /// Namespaces whose import failed: references into them are already explained.
     pub failed_namespaces: std::collections::HashSet<String>,
     /// Documentation for imported types and fields, keyed `ns.Type` / `ns.Type.field`.
@@ -276,6 +280,15 @@ impl TypeCtx {
                 "Int" => Ty::Int,
                 "Float" => Ty::Float,
                 "Str" => Ty::Str,
+                _ if n == crate::check::COMPLETE_VALUE => {
+                    self.completion = Some(TypeCompletion::Names(None));
+                    Ty::Error
+                }
+                _ if n.ends_with(&format!(".{}", crate::check::COMPLETE_NAME)) => {
+                    let ns = &n[..n.len() - crate::check::COMPLETE_NAME.len() - 1];
+                    self.completion = Some(TypeCompletion::Names(Some(ns.to_string())));
+                    Ty::Error
+                }
                 _ if self.alias_src.contains_key(n) => {
                     self.resolve_alias(n, te);
                     Ty::Alias(n.clone())
@@ -384,7 +397,7 @@ impl TypeCtx {
     }
 
     /// Apply one `with` entry. Every operation narrows, so the result is a subtype of `t`.
-    fn patch(&self, t: &Ty, path: &[PathSeg], op: &Op) -> Result<Ty, String> {
+    fn patch(&mut self, t: &Ty, path: &[PathSeg], op: &Op) -> Result<Ty, String> {
         let Some((seg, rest)) = path.split_first() else { return self.patch_here(t, op) };
         if matches!(seg, PathSeg::Index(_) | PathSeg::Select(_)) {
             return Err(format!("`{seg}` selects values; in a type, use `[]` for all elements"));
@@ -406,6 +419,14 @@ impl TypeCtx {
                 let PathSeg::Field(k) = seg else {
                     return Err(format!("`[]` applies to lists and maps, but `{shown}` is a record"));
                 };
+                if k == crate::check::COMPLETE_NAME {
+                    let owner = match &shown {
+                        Ty::Alias(n) => n.clone(),
+                        _ => String::new(),
+                    };
+                    self.completion = Some(TypeCompletion::Fields(r.clone(), owner));
+                    return Ok(Ty::Record(r));
+                }
                 let Some(i) = r.fields.iter().position(|f| f.name == *k) else {
                     if r.open && rest.is_empty() {
                         if let Op::Set(ty, d) = op {
@@ -650,4 +671,13 @@ enum Op {
     Set(Ty, Option<Expr>),
     Where(Expr),
     Remove,
+}
+
+/// What a type position being completed can hold.
+#[derive(Debug, Clone)]
+pub enum TypeCompletion {
+    /// Type names, optionally inside a namespace (`k8s.`).
+    Names(Option<String>),
+    /// Fields of a record, in a type-level `with { ... }` path.
+    Fields(Rec, String),
 }

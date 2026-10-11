@@ -10,17 +10,21 @@ const path = require("path");
 let client;
 let log;
 
-/** The `cleat` binary: setting, else the workspace's cargo build, else PATH. */
+/** The `cleat` binary: setting, else the workspace's newest cargo build, else PATH. */
 function serverPath() {
   const configured = vscode.workspace.getConfiguration("cleat").get("serverPath");
   if (configured) return configured;
+  let best = null;
   for (const folder of vscode.workspace.workspaceFolders || []) {
     for (const profile of ["debug", "release"]) {
       const p = path.join(folder.uri.fsPath, "target", profile, "cleat");
-      if (fs.existsSync(p)) return p;
+      try {
+        const mtime = fs.statSync(p).mtimeMs;
+        if (!best || mtime > best.mtime) best = { p, mtime };
+      } catch {}
     }
   }
-  return "cleat";
+  return best ? best.p : "cleat";
 }
 
 /** JSON-RPC over the server's stdio with `Content-Length` framing. */
@@ -141,6 +145,20 @@ class OutputProvider {
   constructor() {
     this.emitter = new vscode.EventEmitter();
     this.onDidChange = this.emitter.event;
+    this.open = new Set(); // source URIs with a preview
+    this.timers = new Map();
+  }
+
+  /** Re-render a source's preview shortly after its last edit. */
+  schedule(source) {
+    const key = source.toString();
+    if (!this.open.has(key)) return;
+    clearTimeout(this.timers.get(key));
+    this.timers.set(key, setTimeout(() => this.refresh(source), 300));
+  }
+
+  refreshAll() {
+    for (const key of this.open) this.refresh(vscode.Uri.parse(key));
   }
 
   previewUri(source) {
@@ -153,13 +171,17 @@ class OutputProvider {
 
   provideTextDocumentContent(uri) {
     const source = vscode.Uri.parse(uri.query);
+    this.open.add(source.toString());
     const file = source.fsPath;
-    const args = ["export", file];
-    const inputs = file.replace(/\.cleat$/, "") + ".inputs.json";
+    // The unsaved buffer goes through stdin; the file name still places imports.
+    const buffer = vscode.workspace.textDocuments.find((d) => d.uri.toString() === source.toString());
+    const args = ["export", file, "--stdin"];
+    const stem = file.replace(/\.cleat$/, "");
+    const inputs = [".inputs.json", ".inputs.yaml", ".inputs.yml"].map((e) => stem + e).find((p) => fs.existsSync(p)) || stem + ".inputs.json";
     if (fs.existsSync(inputs)) args.push("--input", inputs);
     args.push(...vscode.workspace.getConfiguration("cleat").get("exportArgs"));
     return new Promise((resolve) => {
-      cp.execFile(serverPath(), args, { cwd: path.dirname(file) }, (err, stdout, stderr) => {
+      const child = cp.execFile(serverPath(), args, { cwd: path.dirname(file) }, (err, stdout, stderr) => {
         const header = `# cleat ${args.map((a) => (a === file ? path.basename(a) : a)).join(" ")}\n`;
         if (err && !stdout) {
           const msg = (stderr || err.message).trimEnd().split("\n").map((l) => `# ${l}`).join("\n");
@@ -171,6 +193,7 @@ class OutputProvider {
           resolve(header + stdout);
         }
       });
+      child.stdin.end(buffer ? buffer.getText() : fs.readFileSync(file, "utf8"));
     });
   }
 }
@@ -186,7 +209,11 @@ async function activate(context) {
   context.subscriptions.push(
     vscode.workspace.onDidOpenTextDocument((doc) => isCleat(doc) && didOpen(doc)),
     vscode.workspace.onDidChangeTextDocument((e) => {
+      if (/\.inputs\.(json|ya?ml)$/.test(e.document.uri.fsPath)) output.refreshAll();
       if (!isCleat(e.document)) return;
+      output.schedule(e.document.uri);
+      // Other previews may import this file.
+      for (const key of output.open) if (key !== e.document.uri.toString()) output.schedule(vscode.Uri.parse(key));
       client?.notify("textDocument/didChange", {
         textDocument: { uri: e.document.uri.toString(), version: e.document.version },
         contentChanges: [{ text: e.document.getText() }],
@@ -198,6 +225,9 @@ async function activate(context) {
       diagnostics.delete(doc.uri);
     }),
     vscode.workspace.onDidSaveTextDocument((doc) => isCleat(doc) && output.refresh(doc.uri)),
+    vscode.workspace.onDidCloseTextDocument((doc) => {
+      if (doc.uri.scheme === PREVIEW_SCHEME) output.open.delete(doc.uri.query);
+    }),
     vscode.languages.registerHoverProvider("cleat", {
       async provideHover(doc, pos) {
         if (!client) return null;

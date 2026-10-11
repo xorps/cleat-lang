@@ -54,20 +54,24 @@ pub fn run() -> io::Result<()> {
             "exit" => return Ok(()),
             "textDocument/didOpen" => {
                 let text = str_at(&params, &["textDocument", "text"]).unwrap_or_default();
-                update(&mut out, &mut docs, uri(), text)?;
+                changed(&mut out, &mut docs, uri(), text)?;
             }
             "textDocument/didChange" => {
                 // Full sync: the last change holds the whole document.
                 if let Some(Value::List(changes)) = params.get("contentChanges") {
                     if let Some(Value::Str(text)) = changes.last().and_then(|c| c.get("text")) {
-                        update(&mut out, &mut docs, uri(), text.clone())?;
+                        changed(&mut out, &mut docs, uri(), text.clone())?;
                     }
                 }
             }
             "textDocument/didClose" => {
                 let u = uri();
                 docs.remove(&u);
+                if let Some(p) = uri_to_path(&u) {
+                    crate::modules::clear_overlay(&p);
+                }
                 publish(&mut out, &u, Vec::new())?;
+                recheck_others(&mut out, &mut docs, &u)?;
             }
             "textDocument/completion" => {
                 let result = docs.get(&uri()).and_then(|d| completion(&uri(), d, &params)).unwrap_or(Value::Null);
@@ -91,13 +95,38 @@ pub fn run() -> io::Result<()> {
     Ok(())
 }
 
+/// A document changed: imports of it now see the buffer, and every other open
+/// document is re-checked (cached modules notice what changed underneath them).
+fn changed(out: &mut impl Write, docs: &mut HashMap<String, Doc>, uri: String, text: String) -> io::Result<()> {
+    if let Some(p) = uri_to_path(&uri) {
+        crate::modules::set_overlay(&p, text.clone());
+    }
+    update(out, docs, uri.clone(), text)?;
+    recheck_others(out, docs, &uri)
+}
+
+fn recheck_others(out: &mut impl Write, docs: &mut HashMap<String, Doc>, except: &str) -> io::Result<()> {
+    let others: Vec<(String, String)> =
+        docs.iter().filter(|(u, _)| u.as_str() != except).map(|(u, d)| (u.clone(), d.text.clone())).collect();
+    for (u, text) in others {
+        update(out, docs, u, text)?;
+    }
+    Ok(())
+}
+
 fn update(out: &mut impl Write, docs: &mut HashMap<String, Doc>, uri: String, text: String) -> io::Result<()> {
     let path = uri_to_path(&uri);
     let base = path.as_ref().and_then(|p| p.parent().map(Path::to_path_buf));
     let root = path.as_deref().and_then(crate::modules::find_root);
     let result = catch_unwind(AssertUnwindSafe(|| check_source_in(&text, base.as_deref(), root.as_deref())));
     let (diags, hovers) = match result {
-        Ok(outcome) => (diagnostics(&text, &outcome), outcome.hovers),
+        Ok(outcome) => {
+            let mut d = diagnostics(&text, &outcome);
+            if outcome.errors.is_empty() {
+                d.extend(catch_unwind(AssertUnwindSafe(|| runtime_diagnostics(&uri, &text))).unwrap_or_default());
+            }
+            (d, outcome.hovers)
+        }
         Err(_) => {
             let d = diagnostic(&text, Span { line: 1, col: 1 }, 1, "internal error in the cleat checker (please report)");
             (vec![d], Vec::new())
@@ -114,6 +143,31 @@ fn diagnostics(text: &str, o: &Outcome) -> Vec<Value> {
     let mut v: Vec<Value> = o.errors.iter().map(|d| diagnostic(text, d.span, 1, &d.msg)).collect();
     v.extend(o.warnings.iter().map(|d| diagnostic(text, d.span, 2, &d.msg)));
     v
+}
+
+/// With an `<file>.inputs.json`/`.yaml` next to the file, evaluate it too and report
+/// errors that depend on those inputs (at the call site in this file).
+fn runtime_diagnostics(uri: &str, text: &str) -> Vec<Value> {
+    let Some(path) = uri_to_path(uri) else { return vec![] };
+    let Some(inputs_file) = crate::inputs_file_for(&path) else { return vec![] };
+    let name = inputs_file.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+    let inputs = match crate::read_inputs_file(&inputs_file) {
+        Ok(i) => i,
+        Err(e) => return vec![diagnostic(text, Span { line: 1, col: 1 }, 2, &e)],
+    };
+    let (base, root) = dirs(uri);
+    match crate::export_in(text, base.as_deref(), root.as_deref(), inputs) {
+        Err(crate::ExportError::Eval(errs)) => errs
+            .iter()
+            .map(|e| {
+                // Inside a function, point at the outermost call in this file.
+                let span = e.trace.first().map_or(e.span, |(_, s)| *s);
+                let span = if span.line == 0 { Span { line: 1, col: 1 } } else { span };
+                diagnostic(text, span, 1, &format!("with inputs from {name}: {}", e.msg))
+            })
+            .collect(),
+        _ => vec![],
+    }
 }
 
 fn diagnostic(text: &str, span: Span, severity: i64, msg: &str) -> Value {
@@ -222,7 +276,19 @@ fn completion(uri: &str, doc: &Doc, params: &Value) -> Option<Value> {
 fn definition(uri: &str, doc: &Doc, params: &Value) -> Option<Value> {
     let (line, col) = position(doc, params)?;
     let (base, root) = dirs(uri);
-    let (file, span) = crate::complete::definition(&doc.text, line, col, base.as_deref(), root.as_deref())?;
+    // What the checker resolved at this position, else a syntactic lookup (e.g. import paths).
+    let (l1, c1) = (line as u32 + 1, col as u32 + 1);
+    let resolved = doc
+        .hovers
+        .iter()
+        .filter(|h| h.span.line == l1 && h.span.col <= c1 && c1 < h.span.col + h.len as u32 && h.def.is_some())
+        .min_by_key(|h| h.len)
+        .and_then(|h| h.def.clone())
+        .map(|d| (d.file, d.span));
+    let (file, span) = match resolved {
+        Some(r) => r,
+        None => crate::complete::definition(&doc.text, line, col, base.as_deref(), root.as_deref())?,
+    };
     let (target_uri, text) = match file {
         Some(p) => (format!("file://{}", p.display()), std::fs::read_to_string(&p).unwrap_or_default()),
         None => (uri.to_string(), doc.text.clone()),
