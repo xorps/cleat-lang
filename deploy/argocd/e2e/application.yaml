@@ -6,7 +6,7 @@ spec:
   source:
     repoURL: git://git-server.argocd.svc.cluster.local/app.git
     targetRevision: main
-    path: .
+    path: apps/shop
     plugin:
       name: cleat-v1
       parameters:

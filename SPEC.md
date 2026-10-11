@@ -143,6 +143,15 @@ A default import without a `type` attribute is an error, as is a `type`
 attribute on a namespace or named import. `type` is the only supported
 attribute. Paths are relative to the importing file.
 
+**Imports stay inside the project root.** After resolving `..` and symlinks,
+every imported file, including the imports of imported modules, must lie inside
+the root, or the import is an error. The root is `--root <dir>` if given,
+otherwise the nearest enclosing directory containing `.git`, otherwise the
+entry file's directory. In Argo CD it is the repository checkout. This keeps
+a configuration (or a parameter-driven Argo build) from reading files
+outside the repository, such as `../../../etc/passwd` or a symlink pointing
+elsewhere.
+
 A **Cleat module** may contain types, functions, `let`s, its own imports and
 `refine`s. It may not declare `input`s or `export`s: values come in as
 function parameters and leave as return values. A module is checked on its

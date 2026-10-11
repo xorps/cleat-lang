@@ -89,6 +89,8 @@ spec:
   ones show up in the Application's conditions with Cleat's message.
 - Output uses the `argocd` target, so `export x after y` becomes sync waves
   (`CLEAT_TARGET=plain` turns this off).
+- Imports can't read outside the repository checkout (`..` and symlinks
+  included), so a repository can't use the plugin to read the sidecar's files.
 
 `deploy/argocd/e2e/run.sh` runs all of this against a throwaway kind cluster
 (Argo CD stable, an in-cluster git server, three dependent components) and

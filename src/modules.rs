@@ -116,3 +116,30 @@ pub fn hidden_namespace(path: &str, taken: impl Fn(&str) -> bool) -> String {
     }
     name
 }
+
+/// Resolve an import path relative to `base` and, when there is a project
+/// `root`, require the file (after resolving symlinks) to be inside it.
+pub fn resolve_import(base: Option<&Path>, root: Option<&Path>, path: &str) -> Result<PathBuf, String> {
+    let full = match base {
+        Some(b) => b.join(path),
+        None => PathBuf::from(path),
+    };
+    let Some(root) = root else { return Ok(full) };
+    let canon = full.canonicalize().map_err(|e| format!("cannot read `{path}`: {e}"))?;
+    let root = root.canonicalize().map_err(|e| format!("project root `{}`: {e}", root.display()))?;
+    if canon.starts_with(&root) {
+        Ok(canon)
+    } else {
+        Err(format!(
+            "`{path}` is outside the project root `{}`; imports must stay inside it (see --root)",
+            root.display()
+        ))
+    }
+}
+
+/// The default project root for an entry file: the nearest enclosing
+/// directory containing `.git`, else the file's own directory.
+pub fn find_root(file: &Path) -> Option<PathBuf> {
+    let dir = file.canonicalize().ok()?.parent()?.to_path_buf();
+    dir.ancestors().find(|d| d.join(".git").exists()).map(Path::to_path_buf).or(Some(dir))
+}

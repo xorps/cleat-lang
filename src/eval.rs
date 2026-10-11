@@ -121,10 +121,12 @@ pub fn run(
     items: &[Item],
     ctx: TypeCtx,
     base: Option<&Path>,
+    root: Option<&Path>,
     inputs: Vec<(String, InputValue)>,
 ) -> Result<Vec<Component>, Vec<EvalError>> {
     let mut ev = Evaluator::new(ctx);
     ev.base = base.map(Path::to_path_buf);
+    ev.root = root.map(Path::to_path_buf);
     let mut errs = Vec::new();
     let mut comps = Vec::new();
 
@@ -142,6 +144,13 @@ pub fn run(
         }
     }
 
+    // Like Starlark's `load` and ES imports: all imports are resolved before anything runs,
+    // so a definition may use an import that appears below it (as the checker allows).
+    for item in items {
+        if let Item::Import { form, path, attrs, span } = item {
+            ev.import_item(form, path, attrs, *span).map_err(|e| vec![e])?;
+        }
+    }
     for item in items {
         match item {
             Item::Input { name, ty, default, span } => {
@@ -177,7 +186,7 @@ pub fn run(
             Item::Fn(f) => {
                 ev.fns.insert(f.name.clone(), f.clone());
             }
-            Item::Import { form, path, attrs, span } => ev.import_item(form, path, attrs, *span).map_err(|e| vec![e])?,
+            Item::Import { .. } => {} // resolved above
             Item::Export { name, after, value, .. } => {
                 let docs = match ev.eval(value).map_err(|e| vec![e])? {
                     Value::List(vs) => vs,
@@ -251,6 +260,8 @@ struct Evaluator {
     imports: HashMap<String, Rc<RefCell<Evaluator>>>,
     /// Directory imports resolve against.
     base: Option<PathBuf>,
+    /// Imports must resolve inside this directory.
+    root: Option<PathBuf>,
 }
 
 impl Evaluator {
@@ -264,6 +275,7 @@ impl Evaluator {
             imports: HashMap::new(),
             fn_aliases: HashMap::new(),
             base: None,
+            root: None,
         }
     }
 
@@ -288,10 +300,8 @@ impl Evaluator {
             }
             ImportForm::Default(x) => {
                 let kind = attrs.iter().find(|(k, _, _)| k == "type").map_or("", |(_, v, _)| v.as_str());
-                let full = match &self.base {
-                    Some(b) => b.join(path),
-                    None => PathBuf::from(path),
-                };
+                let full = crate::modules::resolve_import(self.base.as_deref(), self.root.as_deref(), path)
+                    .map_err(|m| self.error(span, m))?;
                 let v = crate::modules::load_data(&full, kind).map_err(|m| self.error(span, m))?;
                 self.globals.push((x.clone(), v));
                 Ok(())
@@ -301,21 +311,25 @@ impl Evaluator {
 
     /// Load an imported `.cleat` module: evaluate its constants and register its functions.
     fn import(&mut self, ns: &str, path: &str, span: Span) -> Result<(), EvalError> {
-        let full = match &self.base {
-            Some(b) => b.join(path),
-            None => PathBuf::from(path),
-        };
+        let full = crate::modules::resolve_import(self.base.as_deref(), self.root.as_deref(), path)
+            .map_err(|m| self.error(span, m))?;
         let module = crate::modules::load(&full).map_err(|m| self.error(span, m))?;
         if !module.is_source {
             return Ok(()); // schemas only contribute types
         }
-        let checked = crate::check::checked_module(&full).map_err(|m| self.error(span, m))?;
+        let checked = crate::check::checked_module(&full, self.root.as_deref()).map_err(|m| self.error(span, m))?;
         let mut sub = Evaluator::new(checked.outcome.ctx.clone());
+        sub.root = self.root.clone();
         sub.base = full.canonicalize().ok().and_then(|p| p.parent().map(Path::to_path_buf));
         let in_module = |e: EvalError| EvalError { msg: format!("in module `{ns}` ({}): {}", path, e.msg), ..e };
         for item in &module.items {
+            if let Item::Import { form, path, attrs, span } = item {
+                sub.import_item(form, path, attrs, *span).map_err(in_module)?;
+            }
+        }
+        for item in &module.items {
             match item {
-                Item::Import { form, path, attrs, span } => sub.import_item(form, path, attrs, *span).map_err(in_module)?,
+                Item::Import { .. } => {}
                 Item::Let { name, ty, value, span } => {
                     let v = sub.eval(value).map_err(in_module)?;
                     let v = match ty {

@@ -37,7 +37,7 @@ k -n argocd rollout status deploy/argocd-repo-server --timeout=300s
 
 echo "==> images"
 [ -f schemas/kubernetes-1.31.json ] || schemas/fetch.sh 1.31
-cp schemas/kubernetes-1.31.json deploy/argocd/e2e/repo/
+cp schemas/kubernetes-1.31.json deploy/argocd/e2e/repo/schemas/
 docker build -q -f deploy/argocd/Dockerfile -t cleat-cmp:dev .
 docker build -q -f deploy/argocd/e2e/git-server.Dockerfile -t cleat-e2e-git:dev deploy/argocd/e2e
 "$KIND" load docker-image --name "$CLUSTER" cleat-cmp:dev cleat-e2e-git:dev
@@ -90,6 +90,21 @@ done
 case "$msg" in
   *"input \`env\`: expected \`Env\`"*) echo "ok   error shown: ${msg##*: error: }" ;;
   *) echo "FAIL no Cleat error in conditions: $msg"; fail=1 ;;
+esac
+
+echo "==> imports cannot leave the repository checkout"
+k -n argocd patch application cleat-e2e --type merge -p '{"spec":{"source":{"plugin":{
+  "env":[{"name":"CLEAT_FILE","value":"escape.cleat"}],
+  "parameters":[{"name":"env","string":"prod"}]}}}}' >/dev/null
+msg=""
+for _ in $(seq 1 20); do
+  msg=$(k -n argocd get application cleat-e2e -o jsonpath='{.status.conditions[*].message}')
+  case "$msg" in *"outside the project root"*) break ;; esac
+  sleep 3
+done
+case "$msg" in
+  *"is outside the project root"*) echo "ok   escape rejected: ${msg##*: error: }" ;;
+  *) echo "FAIL escape not rejected: $msg"; fail=1 ;;
 esac
 
 [ "$fail" = 0 ] && echo "PASS" || { echo "FAILED"; exit 1; }

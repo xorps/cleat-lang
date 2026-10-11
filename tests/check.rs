@@ -1,6 +1,6 @@
 use cleat::targets::{self, FluxOptions};
 use cleat::vc::VcStatus;
-use cleat::{ExportError, InputValue, Value, check_source, check_source_at, emit, export, export_at};
+use cleat::{ExportError, InputValue, Value, check_source, check_source_at, check_source_in, emit, export, export_at};
 use std::path::{Path, PathBuf};
 
 const PRELUDE: &str = r#"
@@ -690,4 +690,47 @@ fn multi_line_strings() {
     err("let a = \"\"\"\n  x\n y\n  \"\"\"", "indented less than the closing quotes");
     err("let a = \"\"\"x\n  \"\"\"", "starts on the line after the opening quotes");
     err("let a = \"\"\"\n  x \"\"\"", "must be on its own line");
+}
+
+// ---- imports stay inside the project root ----
+
+#[test]
+fn imports_are_confined_to_the_root() {
+    let dir = fixture_dir("root", &[]);
+    let repo = dir.join("repo");
+    std::fs::create_dir_all(repo.join("apps/shop")).unwrap();
+    std::fs::create_dir_all(repo.join("lib")).unwrap();
+    std::fs::write(dir.join("secret.txt"), "secret").unwrap();
+    std::fs::write(repo.join("lib/data.json"), "{\"a\": 1}").unwrap();
+    std::fs::write(repo.join("lib/sneaky.cleat"), "import s from \"../../secret.txt\" with { type: \"text\" }\nlet leaked = s").unwrap();
+    let link = repo.join("apps/shop/link.txt");
+    let _ = std::fs::remove_file(&link);
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(dir.join("secret.txt"), &link).unwrap();
+
+    let shop = repo.join("apps/shop");
+    let errs = |body: &str, root: &Path| {
+        check_source_in(body, Some(&shop), Some(root)).errors.into_iter().map(|e| e.msg).collect::<Vec<_>>()
+    };
+    // Inside the root: fine, including `..` that stays inside.
+    assert!(errs("import d from \"../../lib/data.json\" with { type: \"json\" }\nlet a: Int = d.a", &repo).is_empty());
+    // Escapes: a relative path, a symlink, and a module's own import.
+    let e = errs("import s from \"../../../secret.txt\" with { type: \"text\" }\nlet t = s", &repo);
+    assert_eq!(e.len(), 1, "{e:?}"); // no follow-up errors where `s` is used
+    assert!(e[0].contains("is outside the project root"), "{e:?}");
+    #[cfg(unix)]
+    assert!(errs("import s from \"./link.txt\" with { type: \"text\" }", &repo)[0].contains("is outside the project root"));
+    assert!(errs("import * as m from \"../../lib/sneaky.cleat\"", &repo)[0].contains("is outside the project root"));
+    // A wider root allows it.
+    assert!(errs("import s from \"../../../secret.txt\" with { type: \"text\" }", &dir).is_empty());
+}
+
+#[test]
+fn imports_are_resolved_before_anything_runs() {
+    let dir = fixture_dir("hoist", &[("d.json", "{\"n\": 2}"), ("lib.cleat", "let base = k.n\nfn twice(x: Int) -> Int = x * 2\nimport k from \"d.json\" with { type: \"json\" }")]);
+    let out = yaml_at(
+        &dir,
+        "let a = d.n + 1\nlet b = lib.twice(a) + lib.base\nimport d from \"d.json\" with { type: \"json\" }\nimport * as lib from \"lib.cleat\"\nexport { a, b }",
+    );
+    assert_eq!(out, "a: 3\nb: 8\n");
 }

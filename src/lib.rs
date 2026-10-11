@@ -28,8 +28,13 @@ pub fn check_source(src: &str) -> Outcome {
 
 /// Parse and type-check a program whose imports resolve relative to `base`.
 pub fn check_source_at(src: &str, base: Option<&Path>) -> Outcome {
+    check_source_in(src, base, None)
+}
+
+/// Like `check_source_at`, with every import required to stay inside `root`.
+pub fn check_source_in(src: &str, base: Option<&Path>, root: Option<&Path>) -> Outcome {
     match parser::parse_program(src) {
-        Ok(items) => check::check_program(&items, base),
+        Ok(items) => check::check_program_in(&items, base, root),
         Err(e) => Outcome { errors: vec![e], ..Default::default() },
     }
 }
@@ -51,15 +56,25 @@ pub fn export_at(
     base: Option<&Path>,
     inputs: Vec<(String, InputValue)>,
 ) -> Result<(Outcome, Vec<Component>), ExportError> {
+    export_in(src, base, None, inputs)
+}
+
+/// Like `export_at`, with every import required to stay inside `root`.
+pub fn export_in(
+    src: &str,
+    base: Option<&Path>,
+    root: Option<&Path>,
+    inputs: Vec<(String, InputValue)>,
+) -> Result<(Outcome, Vec<Component>), ExportError> {
     let items = match parser::parse_program(src) {
         Ok(items) => items,
         Err(e) => return Err(ExportError::Check(Outcome { errors: vec![e], ..Default::default() })),
     };
-    let outcome = check::check_program(&items, base);
+    let outcome = check::check_program_in(&items, base, root);
     if !outcome.errors.is_empty() {
         return Err(ExportError::Check(outcome));
     }
-    let comps = eval::run(&items, outcome.ctx.clone(), base, inputs).map_err(ExportError::Eval)?;
+    let comps = eval::run(&items, outcome.ctx.clone(), base, root, inputs).map_err(ExportError::Eval)?;
     Ok((outcome, comps))
 }
 
@@ -79,9 +94,9 @@ pub struct InputInfo {
 }
 
 /// The program's inputs, or the check errors if it doesn't check.
-pub fn inputs(src: &str, base: Option<&Path>) -> Result<Vec<InputInfo>, Outcome> {
+pub fn inputs(src: &str, base: Option<&Path>, root: Option<&Path>) -> Result<Vec<InputInfo>, Outcome> {
     let items = parser::parse_program(src).map_err(|e| Outcome { errors: vec![e], ..Default::default() })?;
-    let outcome = check::check_program(&items, base);
+    let outcome = check::check_program_in(&items, base, root);
     if !outcome.errors.is_empty() {
         return Err(outcome);
     }
