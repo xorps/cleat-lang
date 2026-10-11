@@ -2,3 +2,4 @@
 editors/vscode/cleat.vsix
 schemas/*.json
 deploy/argocd/e2e/repo/schemas/*.json
+/_site/

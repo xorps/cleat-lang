@@ -1,0 +1,22 @@
+/* Cleat's colors on mdBook's themes. */
+:root { --cleat-teal: #0e9f83; }
+.navy, .coal, .ayu { --cleat-teal: #35ebc6; }
+.light, .rust { --links: #0e7f6a; }
+.navy, .coal { --links: #35ebc6; }
+
+.cleat-hero { text-align: center; margin: 1.5em 0 2em; }
+.cleat-hero img { width: min(420px, 90%); }
+.cleat-hero .tagline { font-size: 1.25em; margin: .4em 0 1.2em; }
+.light .cleat-hero .dark-only, .rust .cleat-hero .dark-only { display: none; }
+.navy .cleat-hero .light-only, .coal .cleat-hero .light-only, .ayu .cleat-hero .light-only { display: none; }
+
+.cleat-buttons { display: flex; gap: 12px; justify-content: center; flex-wrap: wrap; }
+.cleat-buttons a {
+  padding: .55em 1.2em;
+  border-radius: 8px;
+  border: 1px solid var(--cleat-teal);
+  font-weight: 600;
+  text-decoration: none !important;
+}
+.cleat-buttons a.primary { background: var(--cleat-teal); color: #fff !important; }
+.navy .cleat-buttons a.primary, .coal .cleat-buttons a.primary, .ayu .cleat-buttons a.primary { color: #0b1422 !important; }

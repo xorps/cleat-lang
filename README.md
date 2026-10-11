@@ -12,6 +12,11 @@
 </p>
 
 <p align="center">
+  <a href="https://xorps.github.io/cleat-lang/playground/"><strong>Playground</strong></a> ·
+  <a href="https://xorps.github.io/cleat-lang/"><strong>Documentation</strong></a>
+</p>
+
+<p align="center">
   <a href="https://github.com/xorps/cleat-lang/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/xorps/cleat-lang/actions/workflows/ci.yml/badge.svg"></a>
   <img alt="Rust 1.99" src="https://img.shields.io/badge/rust-1.99-orange">
   <img alt="Status: experimental" src="https://img.shields.io/badge/status-experimental-yellow">
@@ -109,6 +114,10 @@ quickstart.cleat:8:1: error: input `replicas`: 0 does not satisfy `self >= 1`
 | Editor support | limited | limited | Completion, hover, definitions, live preview |
 
 ## Getting started
+
+To try it without installing anything, use the
+[playground](https://xorps.github.io/cleat-lang/playground/): the real
+checker compiled to WebAssembly, with completion, hover and live output.
 
 Cleat is built from source for now (Rust is installed by `rustup` from
 `rust-toolchain.toml`):
@@ -219,6 +228,7 @@ throwaway kind cluster.
 
 ## Learn more
 
+- [Documentation](https://xorps.github.io/cleat-lang/): getting started, a tour, guides for Kubernetes, overlays, Argo CD, Flux and editors
 - [SPEC.md](SPEC.md): the language specification
 - [examples/](examples/): the quickstart above, a web app, and a shared base with a production overlay
 - [deploy/argocd/](deploy/argocd/): the Argo CD plugin, sidecar image and end-to-end test
