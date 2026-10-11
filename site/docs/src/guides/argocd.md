@@ -72,4 +72,6 @@ spec:
 
 `deploy/argocd/e2e/run.sh` creates a throwaway kind cluster, installs a
 pinned Argo CD, builds the sidecar, and checks all of the above against a
-real Argo CD. `deploy/argocd/e2e/run.sh cleanup` deletes the cluster.
+real Argo CD. `deploy/argocd/e2e/run.sh cleanup` deletes the cluster. In
+the repository's CI it runs weekly, on demand, and on pull requests labeled
+`e2e`.
