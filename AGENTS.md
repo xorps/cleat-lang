@@ -133,5 +133,6 @@ Add a test for every bug fix.
 ## Commits
 
 Small, focused commits with an imperative summary line and a body that
-explains why. Don't commit `target/`, downloaded schemas
+explains why, signed off (`git commit -s`, see [CONTRIBUTING.md](CONTRIBUTING.md)).
+The project is Apache-2.0; contributions are accepted as `Apache-2.0 OR MIT`. Don't commit `target/`, downloaded schemas
 (`schemas/*.json`), or `editors/vscode/cleat.vsix`.
