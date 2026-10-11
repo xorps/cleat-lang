@@ -285,9 +285,11 @@ impl Lexer {
             }
         }
         if is_float {
-            s.parse()
-                .map(Tok::Float)
-                .map_err(|_| Diag::new(span, "invalid float literal"))
+            match s.parse::<f64>() {
+                Ok(x) if x.is_finite() => Ok(Tok::Float(x)),
+                Ok(_) => Err(Diag::new(span, "float literal out of range")),
+                Err(_) => Err(Diag::new(span, "invalid float literal")),
+            }
         } else {
             s.parse()
                 .map(Tok::Int)

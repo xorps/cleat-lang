@@ -1244,3 +1244,27 @@ fn kubernetes_enums_match_the_schema() {
         ""
     );
 }
+
+#[test]
+fn values_stay_json_numbers() {
+    // JSON has no infinity or NaN, so nothing may produce them.
+    for (src, msg) in [
+        ("input x: Float\nexport { a: x * 10.0 }", "float overflow"),
+        ("input x: Float\nexport { a: x / 0.0 }", "division by zero"),
+        ("input x: Float\nexport { a: x % 0.0 }", "division by zero"),
+    ] {
+        let e = run(src, &[("x", "1e308")]).unwrap_err();
+        assert!(e.contains(msg), "{src}: {e}");
+    }
+    err("let a = 1e999", "float literal out of range");
+    assert!(cleat::json::parse("1e999").unwrap_err().contains("out of range"));
+    let dir = fixture_dir("nonfinite", &[("inf.yaml", "a: .inf\n"), ("nan.yaml", "a: .NaN\n")]);
+    for f in ["inf.yaml", "nan.yaml"] {
+        let out = check_source_at(&format!("import d from \"{f}\" with {{ type: \"yaml\" }}"), Some(&dir));
+        assert!(
+            out.errors[0].msg.contains("is not a JSON number"),
+            "{f}: {:?}",
+            out.errors
+        );
+    }
+}

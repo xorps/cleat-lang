@@ -15,7 +15,16 @@ fn to_value(y: &Yaml) -> Result<Value, String> {
         Yaml::Null => Value::Null,
         Yaml::Boolean(b) => Value::Bool(*b),
         Yaml::Integer(i) => Value::Int(*i),
-        Yaml::Real(s) => Value::Float(parse_real(s).ok_or_else(|| format!("invalid YAML number `{s}`"))?),
+        Yaml::Real(s) => match parse_real(s) {
+            Some(x) if x.is_finite() => Value::Float(x),
+            // Values are JSON, which has no infinity or NaN.
+            Some(_) => {
+                return Err(format!(
+                    "YAML number `{s}` is not a JSON number (infinity, NaN or out of range)"
+                ));
+            }
+            None => return Err(format!("invalid YAML number `{s}`")),
+        },
         Yaml::String(s) => Value::Str(s.clone()),
         Yaml::Array(xs) => Value::List(xs.iter().map(to_value).collect::<Result<_, _>>()?),
         Yaml::Hash(h) => {
