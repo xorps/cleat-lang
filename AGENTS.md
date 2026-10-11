@@ -97,6 +97,10 @@ These are deliberate; changing them is a design decision, not a fix.
 - **Some tests need the Kubernetes schema** (`schemas/kubernetes-1.37.json`,
   not committed). They print "skipping" without it; run `schemas/fetch.sh 1.37`
   so they actually run.
+- **Validate workflow YAML strictly** after editing `.github/`:
+  `ruby -ryaml -e 'YAML.load_file(ARGV[0])' .github/workflows/ci.yml`.
+  Cleat's own YAML reader is more lenient than GitHub's (for example about
+  `: ` inside unquoted values), so it isn't a reliable check here.
 - **The sidecar image is distroless**: no shell. Inspect it with
   `docker image inspect` and `docker cp`, not `docker run ... sh`.
 
