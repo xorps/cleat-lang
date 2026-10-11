@@ -834,3 +834,30 @@ fn completion_of_types_type_patches_and_patterns() {
     has("fn f(r: Svc | Cm) -> Int = match r { ‸ }", &["{ kind: \"Service\", .. } => ", "{ kind: \"ConfigMap\", .. } => "], &[]);
     has("fn f(r: Svc | Cm) -> Int = match r { x: ‸ }", &["Svc", "Cm"], &[]);
 }
+
+#[test]
+fn kubernetes_enums_match_the_schema() {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("schemas/kubernetes-1.31.json");
+    if !path.exists() {
+        eprintln!("skipping: run schemas/fetch.sh to download the Kubernetes schema");
+        return;
+    }
+    // Every curated enum must land on a string field; a renamed field fails here.
+    let doc = cleat::json::parse(&std::fs::read_to_string(&path).unwrap()).unwrap();
+    assert_eq!(cleat::openapi::kubernetes_enums_applied(&doc), cleat::openapi::KUBERNETES_ENUMS.len());
+
+    let dir = path.parent().unwrap().to_path_buf();
+    let errs = |body: &str| {
+        check_source_at(&format!("import * as k8s from \"kubernetes-1.31.json\"\n{body}"), Some(&dir))
+            .errors
+            .into_iter()
+            .map(|e| e.msg)
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+    assert!(errs("let s = k8s.Service { metadata.name: \"a\", spec.type: \"Cluster\" }")
+        .contains("expected `\"ClusterIP\" | \"NodePort\" | \"LoadBalancer\" | \"ExternalName\"`"));
+    assert!(errs("let p = k8s.PersistentVolumeClaim { metadata.name: \"a\", spec.accessModes: [\"ReadWriteOne\"] }").contains("type mismatch"));
+    assert_eq!(errs("let p = k8s.PersistentVolumeClaim { metadata.name: \"a\", spec.accessModes: [\"ReadWriteOnce\"] }"), "");
+    assert_eq!(errs("let t: k8s.Toleration = { key: \"a\", operator: \"Exists\", effect: \"\" }"), "");
+}

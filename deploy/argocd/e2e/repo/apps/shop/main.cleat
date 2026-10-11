@@ -3,7 +3,7 @@
 
 import * as k8s from "../../schemas/kubernetes-1.31.json"   // outside the app path, inside the repo
 
-refine k8s.ServiceSpec with { type: "ClusterIP" | "NodePort" | "LoadBalancer" | "ExternalName" }
+refine k8s.ServiceSpec with { type: "ClusterIP" | "LoadBalancer" }
 
 type Env = "dev" | "prod"
 
