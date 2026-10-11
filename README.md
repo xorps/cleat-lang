@@ -12,7 +12,7 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/xorps/test-lang/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/xorps/test-lang/actions/workflows/ci.yml/badge.svg"></a>
+  <a href="https://github.com/xorps/cleat-lang/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/xorps/cleat-lang/actions/workflows/ci.yml/badge.svg"></a>
   <img alt="Rust 1.99" src="https://img.shields.io/badge/rust-1.99-orange">
   <img alt="Status: experimental" src="https://img.shields.io/badge/status-experimental-yellow">
 </p>
@@ -111,7 +111,7 @@ Cleat is built from source for now (Rust is installed by `rustup` from
 `rust-toolchain.toml`):
 
 ```sh
-git clone https://github.com/xorps/test-lang && cd test-lang
+git clone https://github.com/xorps/cleat-lang && cd cleat-lang
 cargo install --path .                 # installs the `cleat` binary
 schemas/fetch.sh 1.37                  # Kubernetes OpenAPI spec, checksum-verified
 
