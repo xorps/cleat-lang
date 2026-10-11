@@ -58,6 +58,8 @@ k -n argocd rollout status deploy/argocd-repo-server --timeout=300s
 
 echo "==> images"
 [ -f schemas/kubernetes-1.37.json ] || schemas/fetch.sh 1.37
+# The schemas directory holds only this downloaded file, so a fresh checkout has none.
+mkdir -p deploy/argocd/e2e/repo/schemas
 cp schemas/kubernetes-1.37.json deploy/argocd/e2e/repo/schemas/
 docker build -q -f deploy/argocd/Dockerfile -t cleat-cmp:dev .
 docker build -q -f deploy/argocd/e2e/git-server.Dockerfile -t cleat-e2e-git:dev deploy/argocd/e2e
