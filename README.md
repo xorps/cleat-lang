@@ -219,3 +219,9 @@ throwaway kind cluster.
 - [examples/](examples/): the quickstart above, a web app, and a shared base with a production overlay
 - [deploy/argocd/](deploy/argocd/): the Argo CD plugin, sidecar image and end-to-end test
 - [AGENTS.md](AGENTS.md): how the code is organized, and how to build, test and contribute
+- [CONTRIBUTING.md](CONTRIBUTING.md): pull requests, sign-off, and licensing of contributions
+
+## License
+
+Cleat is licensed under the [Apache License 2.0](LICENSE).
+Contributions are accepted under `Apache-2.0 OR MIT`; see [CONTRIBUTING.md](CONTRIBUTING.md).

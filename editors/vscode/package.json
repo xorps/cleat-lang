@@ -4,7 +4,7 @@
   "description": "Cleat language support: diagnostics, hover, syntax highlighting, and live output preview.",
   "publisher": "cleat-lang",
   "version": "0.1.0",
-  "license": "UNLICENSED",
+  "license": "Apache-2.0",
   "engines": {
     "vscode": "^1.80.0"
   },
