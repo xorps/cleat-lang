@@ -50,7 +50,7 @@ fn yaml(s: &str, inputs: &[(&str, &str)]) -> String {
 #[test]
 fn webapp_example_checks_and_exports() {
     let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("examples");
-    if !dir.join("../schemas/kubernetes-1.31.json").exists() {
+    if !dir.join("../schemas/kubernetes-1.37.json").exists() {
         eprintln!("skipping: run schemas/fetch.sh to download the Kubernetes schema");
         return;
     }
@@ -1154,7 +1154,7 @@ fn completion_of_types_type_patches_and_patterns() {
 
 #[test]
 fn kubernetes_enums_match_the_schema() {
-    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("schemas/kubernetes-1.31.json");
+    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("schemas/kubernetes-1.37.json");
     if !path.exists() {
         eprintln!("skipping: run schemas/fetch.sh to download the Kubernetes schema");
         return;
@@ -1169,7 +1169,7 @@ fn kubernetes_enums_match_the_schema() {
     let dir = path.parent().unwrap().to_path_buf();
     let errs = |body: &str| {
         check_source_at(
-            &format!("import * as k8s from \"kubernetes-1.31.json\"\n{body}"),
+            &format!("import * as k8s from \"kubernetes-1.37.json\"\n{body}"),
             Some(&dir),
         )
         .errors

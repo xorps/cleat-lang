@@ -2,7 +2,7 @@
 // A module can define types, functions and constants, import schemas, and refine types;
 // it cannot declare inputs or exports.
 
-import * as k8s from "../../schemas/kubernetes-1.31.json"
+import * as k8s from "../../schemas/kubernetes-1.37.json"
 
 // Project policy: no NodePort or ExternalName Services.
 refine k8s.ServiceSpec with { type: "ClusterIP" | "LoadBalancer" }

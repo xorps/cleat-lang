@@ -1,7 +1,7 @@
 // End-to-end test app: three components ordered with `after`,
 // which become Argo CD sync waves 0, 1 and 2.
 
-import * as k8s from "../../schemas/kubernetes-1.31.json"   // outside the app path, inside the repo
+import * as k8s from "../../schemas/kubernetes-1.37.json"   // outside the app path, inside the repo
 
 refine k8s.ServiceSpec with { type: "ClusterIP" | "LoadBalancer" }
 

@@ -1,9 +1,9 @@
 #!/bin/sh
 # Download a Kubernetes OpenAPI spec into schemas/ (not committed) and verify it
 # against schemas/SHA256SUMS.
-# Usage: schemas/fetch.sh [version]   (default: 1.31)
+# Usage: schemas/fetch.sh [version]   (default: 1.37)
 set -eu
-v=${1:-1.31}
+v=${1:-1.37}
 dir=$(cd "$(dirname "$0")" && pwd)
 name="kubernetes-$v.json"
 tmp="$dir/$name.download"
