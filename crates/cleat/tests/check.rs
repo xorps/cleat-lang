@@ -672,6 +672,55 @@ fn refine_applies_to_every_reference() {
     assert!(es[0].msg.contains("7 does not satisfy `self <= 5`"), "{}", es[0].msg);
 }
 
+#[test]
+fn refine_applies_through_every_import_of_a_file() {
+    // A file imported both as a namespace and by name is one set of types, so a
+    // policy refined through either name can't be bypassed through the other.
+    let dir = fixture_dir("refine-twice", &[("api.json", SWAGGER), ("lib.cleat", LIB)]);
+    let errs = |src: &str| {
+        check_source_at(src, Some(&dir))
+            .errors
+            .into_iter()
+            .map(|e| e.msg)
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+    let both = "import * as t from \"api.json\"\nimport { Site } from \"api.json\"\n";
+    let bad = "spec: { host: \"c\" }";
+    for (refine, value) in [
+        ("refine t.SiteSpec with { host: \"a\" }", format!("Site {{ {bad} }}")),
+        ("refine Site with { spec.host: \"a\" }", format!("t.Site {{ {bad} }}")),
+    ] {
+        let e = errs(&format!("{both}{refine}\nlet s = {value}"));
+        assert!(e.contains("expected `\"a\"`, found `\"c\"`"), "{refine}: {e}");
+    }
+    // A module's types are refined before its function signatures are resolved
+    // (`lib.app` returns `[Res]`), so the refinement isn't lost.
+    let e = errs(
+        "import * as lib from \"lib.cleat\"\nrefine lib.Res with { kind: \"Service\" }\n\
+         let r: lib.Res = { kind: \"Deployment\", metadata.name: \"a\" }",
+    );
+    assert!(e.contains("expected `\"Service\"`"), "{e}");
+    // Both names for one Cleat module.
+    let e = errs(
+        "import * as lib from \"lib.cleat\"\nimport { Res } from \"lib.cleat\"\n\
+         refine lib.Res with { kind: \"Service\" }\nlet r: Res = { kind: \"Deployment\", metadata.name: \"a\" }",
+    );
+    assert!(e.contains("expected `\"Service\"`"), "{e}");
+}
+
+#[test]
+fn refine_into_a_failed_import_reports_only_the_import() {
+    let e: Vec<String> =
+        check_source("import * as k8s from \"missing.json\"\nrefine k8s.ServiceSpec with { type: \"ClusterIP\" }")
+            .errors
+            .into_iter()
+            .map(|e| e.msg)
+            .collect();
+    assert_eq!(e.len(), 1, "{e:?}");
+    assert!(e[0].contains("cannot read"), "{e:?}");
+}
+
 // ---- value patches: `e with { ... }` ----
 
 const DEPLOY: &str = r#"
