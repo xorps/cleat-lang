@@ -2,6 +2,7 @@
 
 pub mod ast;
 pub mod check;
+pub mod complete;
 pub mod diag;
 pub mod emit;
 pub mod eval;

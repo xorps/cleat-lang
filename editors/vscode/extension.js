@@ -209,6 +209,47 @@ async function activate(context) {
         return new vscode.Hover(new vscode.MarkdownString(r.contents.value), r.range && toRange(r.range));
       },
     }),
+    vscode.languages.registerCompletionItemProvider(
+      "cleat",
+      {
+        async provideCompletionItems(doc, pos) {
+          if (!client) return null;
+          const r = await client.request("textDocument/completion", {
+            textDocument: { uri: doc.uri.toString() },
+            position: { line: pos.line, character: pos.character },
+          });
+          if (!r) return null;
+          // LSP CompletionItemKind numbers are one more than VS Code's.
+          return r.items.map((i) => {
+            const item = new vscode.CompletionItem(i.label, (i.kind || 1) - 1);
+            item.detail = i.detail;
+            if (i.documentation) item.documentation = new vscode.MarkdownString(i.documentation.value);
+            item.sortText = i.sortText;
+            item.filterText = i.filterText;
+            item.insertText = i.textEdit.newText;
+            item.range = toRange(i.textEdit.range);
+            if (i.textEdit.newText.endsWith(": ") || i.textEdit.newText.endsWith("(")) {
+              item.command = { command: "editor.action.triggerSuggest", title: "" };
+            }
+            return item;
+          });
+        },
+      },
+      ".",
+      '"',
+      "{",
+      ","
+    ),
+    vscode.languages.registerDefinitionProvider("cleat", {
+      async provideDefinition(doc, pos) {
+        if (!client) return null;
+        const r = await client.request("textDocument/definition", {
+          textDocument: { uri: doc.uri.toString() },
+          position: { line: pos.line, character: pos.character },
+        });
+        return r ? new vscode.Location(vscode.Uri.parse(r.uri), toRange(r.range)) : null;
+      },
+    }),
     vscode.workspace.registerTextDocumentContentProvider(PREVIEW_SCHEME, output),
     vscode.commands.registerCommand("cleat.showOutput", async () => {
       const editor = vscode.window.activeTextEditor;

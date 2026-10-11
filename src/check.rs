@@ -21,8 +21,36 @@ pub struct Outcome {
     /// What this program offers when imported as a module.
     pub fns: Vec<(String, Signature)>,
     pub globals: Vec<(String, Ty)>,
+    /// Completion candidates, when the program contains the completion placeholder
+    /// (see `complete.rs`).
+    pub completions: Option<Vec<Completion>>,
     /// Resolved type aliases, for the evaluator.
     pub ctx: TypeCtx,
+}
+
+/// The placeholders `complete.rs` puts at the cursor: a key/member name, or a value.
+pub const COMPLETE_NAME: &str = "__cleat_complete__";
+pub const COMPLETE_VALUE: &str = "__cleat_value__";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CompletionKind {
+    Field,
+    Value,
+    Variable,
+    Function,
+    Module,
+    Type,
+}
+
+#[derive(Debug, Clone)]
+pub struct Completion {
+    pub label: String,
+    pub kind: CompletionKind,
+    pub detail: Option<String>,
+    pub doc: Option<String>,
+    pub insert: String,
+    /// Sorts before the others (e.g. required fields not yet set).
+    pub preferred: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -958,6 +986,10 @@ impl Checker {
     // ---------- checking mode ----------
 
     fn check(&mut self, e: &Expr, expected: &Ty) {
+        if matches!(&e.kind, ExprKind::Var(n) if n == COMPLETE_VALUE) {
+            self.complete_values(Some(expected));
+            return;
+        }
         // A literal object/list is never null: check it against the non-null part of
         // an optional type (`T | null`), so errors stay field by field.
         if matches!(e.kind, ExprKind::Object(_) | ExprKind::List(_) | ExprKind::Tuple(_)) {
@@ -1159,8 +1191,16 @@ impl Checker {
     fn check_members(&mut self, ms: &[Member], r: &Rec, shown: &str) -> (HashSet<String>, bool) {
         let mut guaranteed = HashSet::new();
         let mut dynamic = false;
+        if ms.iter().any(|m| matches!(m, Member::Field(k, _, _) if k == COMPLETE_NAME)) {
+            let present: Vec<&str> = ms
+                .iter()
+                .filter_map(|m| if let Member::Field(k, _, _) = m { Some(k.as_str()) } else { None })
+                .collect();
+            self.complete_fields(r, shown, &present);
+        }
         for m in ms {
             match m {
+                Member::Field(k, _, _) if k == COMPLETE_NAME => {}
                 Member::Field(k, e, span) => match r.get(k) {
                     Some(f) => {
                         let text = format!("// {shown}\n{}", Self::field_sig(f));
@@ -1357,6 +1397,18 @@ impl Checker {
                 }
             }
             ExprKind::Field(b, label, optional) => {
+                if *label == Label::Name(COMPLETE_NAME.into()) {
+                    match qualified_name(b) {
+                        Some(ns) if self.lookup(&ns).is_none() && self.namespaces.contains(ns.split('.').next().unwrap_or("")) => {
+                            self.complete_namespace(&ns);
+                        }
+                        _ => {
+                            let bt = self.synth(b);
+                            self.complete_members(&bt);
+                        }
+                    }
+                    return Ty::Error;
+                }
                 // `ns.x`: a constant from an imported module.
                 if let Some(q) = qualified_name(e) {
                     let root = q.split('.').next().unwrap_or("");
@@ -1457,6 +1509,10 @@ impl Checker {
     }
 
     fn var_ty(&mut self, n: &str, span: Span) -> Ty {
+        if n == COMPLETE_VALUE || n == COMPLETE_NAME {
+            self.complete_values(None);
+            return Ty::Error;
+        }
         if let Some(t) = self.lookup(n).cloned() {
             if n != "self" {
                 self.hover(span, n, format!("{n}: {t}"));
@@ -1860,6 +1916,10 @@ impl Checker {
                 let PathSeg::Field(k) = seg else {
                     return fail(self, format!("`{seg}` applies to lists, but `{shown}` is an object"));
                 };
+                if k == COMPLETE_NAME {
+                    self.complete_fields(&r, &shown, &[]);
+                    return tn;
+                }
                 let Some(i) = r.fields.iter().position(|f| f.name == *k) else {
                     if declared && !r.open {
                         let hint = did_you_mean(k, r.fields.iter().map(|f| f.name.as_str()));
@@ -2118,6 +2178,175 @@ impl Checker {
                 Ty::Error
             }
         }
+    }
+
+    // ---------- completion ----------
+
+    fn offer(&mut self, items: Vec<Completion>) {
+        self.out.completions.get_or_insert_with(Vec::new).extend(items);
+    }
+
+    /// Keys of a record that aren't set yet; required ones first.
+    fn complete_fields(&mut self, r: &Rec, owner: &str, present: &[&str]) {
+        let canon = self.canonical(owner);
+        let items = r
+            .fields
+            .iter()
+            .filter(|f| !present.contains(&f.name.as_str()))
+            .map(|f| Completion {
+                label: f.name.clone(),
+                kind: CompletionKind::Field,
+                detail: Some(Self::field_sig(f)),
+                doc: self.ctx.docs.get(&format!("{canon}.{}", f.name)).cloned(),
+                insert: format!("{}: ", fmt_key(&f.name)),
+                preferred: f.presence == Presence::Required,
+            })
+            .collect();
+        self.offer(items);
+    }
+
+    /// Fields readable on a value of type `t` (after `x.`).
+    fn complete_members(&mut self, t: &Ty) {
+        let ms: Vec<Ty> = self.union_members(t).into_iter().filter(|m| !self.is_null(m)).collect();
+        let mut items = Vec::new();
+        for m in ms {
+            if let Ty::Record(r) = self.ctx.shape(&m) {
+                let owner = match self.norm(&m) {
+                    Ty::Alias(n) => self.canonical(&n),
+                    _ => String::new(),
+                };
+                for f in &r.fields {
+                    if items.iter().any(|c: &Completion| c.label == f.name) {
+                        continue;
+                    }
+                    items.push(Completion {
+                        label: f.name.clone(),
+                        kind: CompletionKind::Field,
+                        detail: Some(Self::field_sig(f)),
+                        doc: self.ctx.docs.get(&format!("{owner}.{}", f.name)).cloned(),
+                        insert: f.name.clone(),
+                        preferred: false,
+                    });
+                }
+            }
+        }
+        self.offer(items);
+    }
+
+    /// What `ns.` offers: constants, functions, types, and nested namespaces.
+    fn complete_namespace(&mut self, ns: &str) {
+        let prefix = format!("{ns}.");
+        let mut items: Vec<Completion> = Vec::new();
+        let mut push = |label: &str, kind, detail: Option<String>| {
+            if !items.iter().any(|c| c.label == label) {
+                items.push(Completion {
+                    label: label.to_string(),
+                    kind,
+                    detail,
+                    doc: None,
+                    insert: label.to_string(),
+                    preferred: false,
+                });
+            }
+        };
+        for (n, t) in &self.scope {
+            if let Some(rest) = n.strip_prefix(&prefix).filter(|r| !r.contains('.')) {
+                push(rest, CompletionKind::Variable, Some(format!("{rest}: {t}")));
+            }
+        }
+        for (n, sig) in &self.fns {
+            if let Some(rest) = n.strip_prefix(&prefix).filter(|r| !r.contains('.')) {
+                push(rest, CompletionKind::Function, Some(Self::fn_sig_text(rest, sig)));
+            }
+        }
+        let mut types: Vec<&String> = self.ctx.alias_src.keys().filter(|k| k.starts_with(&prefix) && !k.contains('#')).collect();
+        types.sort();
+        for n in types {
+            let rest = &n[prefix.len()..];
+            match rest.split_once('.') {
+                Some((group, _)) => push(group, CompletionKind::Module, None),
+                None => push(rest, CompletionKind::Type, Some(format!("type {n}"))),
+            }
+        }
+        self.offer(items);
+    }
+
+    /// Values for a position: literals of the expected type, then variables and functions that fit.
+    fn complete_values(&mut self, expected: Option<&Ty>) {
+        let mut items = Vec::new();
+        if let Some(t) = expected {
+            for m in self.ctx.members(t) {
+                if let Ty::Lit(l) = m.strip() {
+                    let text = l.to_string();
+                    items.push(Completion {
+                        label: text.clone(),
+                        kind: CompletionKind::Value,
+                        detail: Some(format!("{}", self.norm(t))),
+                        doc: None,
+                        insert: text,
+                        preferred: true,
+                    });
+                }
+            }
+        }
+        let fits = |c: &Self, ty: &Ty| expected.is_none_or(|x| c.sub(ty, x));
+        let vars: Vec<(String, Ty)> = self
+            .scope
+            .iter()
+            .rev()
+            .filter(|(n, _)| n != "self" && !n.contains('.'))
+            .cloned()
+            .collect();
+        for (n, t) in vars {
+            if fits(self, &t) && !items.iter().any(|c: &Completion| c.label == n) {
+                items.push(Completion {
+                    label: n.clone(),
+                    kind: CompletionKind::Variable,
+                    detail: Some(format!("{n}: {t}")),
+                    doc: None,
+                    insert: n,
+                    preferred: false,
+                });
+            }
+        }
+        let fns: Vec<(String, FnSig)> = self.fns.iter().filter(|(n, _)| !n.contains('.')).map(|(n, s)| (n.clone(), s.clone())).collect();
+        for (n, sig) in fns {
+            if fits(self, &sig.ret) {
+                items.push(Completion {
+                    label: n.clone(),
+                    kind: CompletionKind::Function,
+                    detail: Some(Self::fn_sig_text(&n, &sig)),
+                    doc: None,
+                    insert: format!("{n}("),
+                    preferred: false,
+                });
+            }
+        }
+        if expected.is_none() {
+            let mut nss: Vec<String> = self.namespaces.iter().filter(|n| !self.hidden_labels.contains_key(*n)).cloned().collect();
+            nss.sort();
+            for ns in nss {
+                items.push(Completion {
+                    label: ns.clone(),
+                    kind: CompletionKind::Module,
+                    detail: None,
+                    doc: None,
+                    insert: ns,
+                    preferred: false,
+                });
+            }
+            for b in BUILTINS {
+                items.push(Completion {
+                    label: b.to_string(),
+                    kind: CompletionKind::Function,
+                    detail: Some(crate::eval::builtin_doc(b).lines().next().unwrap_or("").to_string()),
+                    doc: None,
+                    insert: format!("{b}("),
+                    preferred: false,
+                });
+            }
+        }
+        self.offer(items);
     }
 
     // ---------- calls ----------

@@ -47,6 +47,25 @@ fn main() -> ExitCode {
         eprintln!("{USAGE}");
         return ExitCode::from(2);
     };
+    if cmd == "complete" {
+        // Debugging aid for editor integrations: cleat complete <file> <line> <col> (0-based).
+        let (Some(file), Some(line), Some(col)) = (args.get(1), args.get(2), args.get(3)) else {
+            eprintln!("usage: cleat complete <file> <line> <col>");
+            return ExitCode::from(2);
+        };
+        let src = std::fs::read_to_string(file).unwrap_or_default();
+        let root = cleat::modules::find_root(std::path::Path::new(file));
+        let c = cleat::complete::complete(&src, line.parse().unwrap_or(0), col.parse().unwrap_or(0), base_dir(file).as_deref(), root.as_deref());
+        match c {
+            Some(c) => {
+                for i in c.items {
+                    println!("{:<24} {:?}  {}", i.insert, i.kind, i.detail.unwrap_or_default());
+                }
+            }
+            None => println!("(no completions)"),
+        }
+        return ExitCode::SUCCESS;
+    }
     if cmd == "argocd" {
         return argocd(args.get(1).map(String::as_str));
     }
