@@ -1,5 +1,5 @@
 //! A small Language Server Protocol server over stdio: diagnostics on every
-//! change, and hover. Uses the crate's own JSON reader/writer.
+//! change, hover, completion and go-to-definition. Uses the crate's own JSON reader/writer.
 
 use std::collections::HashMap;
 use std::io::{self, BufRead, Write};
@@ -38,6 +38,11 @@ pub fn run() -> io::Result<()> {
                         obj(vec![("openClose", Value::Bool(true)), ("change", Value::Int(1))]),
                     ),
                     ("hoverProvider", Value::Bool(true)),
+                    ("definitionProvider", Value::Bool(true)),
+                    (
+                        "completionProvider",
+                        obj(vec![("triggerCharacters", Value::List(vec![s("."), s("\""), s("{"), s(",")]))]),
+                    ),
                 ]);
                 let result = obj(vec![
                     ("capabilities", caps),
@@ -63,6 +68,14 @@ pub fn run() -> io::Result<()> {
                 let u = uri();
                 docs.remove(&u);
                 publish(&mut out, &u, Vec::new())?;
+            }
+            "textDocument/completion" => {
+                let result = docs.get(&uri()).and_then(|d| completion(&uri(), d, &params)).unwrap_or(Value::Null);
+                respond(&mut out, id, result)?;
+            }
+            "textDocument/definition" => {
+                let result = docs.get(&uri()).and_then(|d| definition(&uri(), d, &params)).unwrap_or(Value::Null);
+                respond(&mut out, id, result)?;
             }
             "textDocument/hover" => {
                 let result = docs.get(&uri()).and_then(|d| hover(d, &params)).unwrap_or(Value::Null);
@@ -141,6 +154,80 @@ fn hover(doc: &Doc, params: &Value) -> Option<Value> {
     }
     let contents = obj(vec![("kind", s("markdown")), ("value", s(&md))]);
     Some(obj(vec![("contents", contents), ("range", range(&doc.text, h.span, h.len))]))
+}
+
+/// The document's directory and project root, for resolving imports.
+fn dirs(uri: &str) -> (Option<PathBuf>, Option<PathBuf>) {
+    let path = uri_to_path(uri);
+    let base = path.as_ref().and_then(|p| p.parent().map(Path::to_path_buf));
+    let root = path.as_deref().and_then(crate::modules::find_root);
+    (base, root)
+}
+
+/// 0-based line and character (not UTF-16) of a request's position.
+fn position(doc: &Doc, params: &Value) -> Option<(usize, usize)> {
+    let pos = params.get("position")?;
+    let (Some(Value::Int(line)), Some(Value::Int(ch))) = (pos.get("line"), pos.get("character")) else {
+        return None;
+    };
+    let line_text = doc.text.lines().nth(*line as usize).unwrap_or("");
+    Some((*line as usize, utf16_to_col(line_text, *ch as usize) as usize - 1))
+}
+
+fn completion(uri: &str, doc: &Doc, params: &Value) -> Option<Value> {
+    use crate::check::CompletionKind as K;
+    let (line, col) = position(doc, params)?;
+    let (base, root) = dirs(uri);
+    let text = doc.text.clone();
+    let c = catch_unwind(AssertUnwindSafe(|| crate::complete::complete(&text, line, col, base.as_deref(), root.as_deref())))
+        .ok()??;
+    let line_text = doc.text.lines().nth(line).unwrap_or("");
+    let start = col_to_utf16(line_text, col.saturating_sub(c.replace_len));
+    let end = col_to_utf16(line_text, col);
+    let pos = |ch: usize| obj(vec![("line", Value::Int(line as i64)), ("character", Value::Int(ch as i64))]);
+    let range = obj(vec![("start", pos(start)), ("end", pos(end))]);
+    let items: Vec<Value> = c
+        .items
+        .iter()
+        .enumerate()
+        .map(|(i, item)| {
+            // LSP CompletionItemKind numbers.
+            let kind = match item.kind {
+                K::Field => 5,
+                K::Value => 12,
+                K::Variable => 6,
+                K::Function => 3,
+                K::Module => 9,
+                K::Type => 22,
+            };
+            let mut fields = vec![
+                ("label", s(&item.label)),
+                ("kind", Value::Int(kind)),
+                ("sortText", s(&format!("{i:05}"))),
+                ("filterText", s(&item.label)),
+                ("textEdit", obj(vec![("range", range.clone()), ("newText", s(&item.insert))])),
+            ];
+            if let Some(d) = &item.detail {
+                fields.push(("detail", s(d)));
+            }
+            if let Some(d) = &item.doc {
+                fields.push(("documentation", obj(vec![("kind", s("markdown")), ("value", s(d))])));
+            }
+            obj(fields)
+        })
+        .collect();
+    Some(obj(vec![("isIncomplete", Value::Bool(false)), ("items", Value::List(items))]))
+}
+
+fn definition(uri: &str, doc: &Doc, params: &Value) -> Option<Value> {
+    let (line, col) = position(doc, params)?;
+    let (base, root) = dirs(uri);
+    let (file, span) = crate::complete::definition(&doc.text, line, col, base.as_deref(), root.as_deref())?;
+    let (target_uri, text) = match file {
+        Some(p) => (format!("file://{}", p.display()), std::fs::read_to_string(&p).unwrap_or_default()),
+        None => (uri.to_string(), doc.text.clone()),
+    };
+    Some(obj(vec![("uri", s(&target_uri)), ("range", range(&text, span, 0))]))
 }
 
 // ---------- positions ----------

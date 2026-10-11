@@ -734,3 +734,77 @@ fn imports_are_resolved_before_anything_runs() {
     );
     assert_eq!(out, "a: 3\nb: 8\n");
 }
+
+// ---- completion and go-to-definition ----
+
+/// Completions at `‸` in `src` (which runs with `dir` as the base directory).
+fn completions(dir: &Path, src: &str) -> (Vec<String>, usize) {
+    let (before, after) = src.split_once('‸').expect("cursor marker");
+    let line = before.matches('\n').count();
+    let col = before.rsplit('\n').next().unwrap().chars().count();
+    match cleat::complete::complete(&format!("{before}{after}"), line, col, Some(dir), None) {
+        Some(c) => (c.items.into_iter().map(|i| i.insert).collect(), c.replace_len),
+        None => (vec![], 0),
+    }
+}
+
+#[test]
+fn completion_of_keys_values_and_members() {
+    let dir = fixture_dir("complete", &[("api.json", SWAGGER), ("lib.cleat", LIB)]);
+    let has = |src: &str, want: &[&str], not: &[&str]| {
+        let (items, _) = completions(&dir, &format!("{PRELUDE}\n{src}"));
+        for w in want {
+            assert!(items.iter().any(|i| i == w), "missing {w:?} in {items:?} for {src}");
+        }
+        for n in not {
+            assert!(!items.iter().any(|i| i == n), "unexpected {n:?} in {items:?} for {src}");
+        }
+    };
+    // Object keys, with fields already set left out.
+    has("let s = Svc { metadata.name: \"a\", spec: { ‸ } }", &["ports: ", "type: "], &["metadata: "]);
+    has("let s = Svc { ‸ }", &["metadata: ", "spec: "], &["apiVersion: x"]);
+    has("let s = Svc { metadata.name: \"a\"\n  ‸ }", &["spec: "], &["metadata: "]); // no comma yet
+    has("let s = Svc { metadata.‸ }", &["name: ", "labels: "], &[]);
+    // Keys set further down are left out too.
+    has("let s = Svc {\n  ‸\n  spec.ports: [],\n  apiVersion: \"v1\",\n}", &["metadata: "], &["spec: ", "apiVersion: "]);
+    let (items, replace) = completions(&dir, &format!("{PRELUDE}\nlet s = Svc {{ meta‸ }}"));
+    assert!(items.contains(&"metadata: ".to_string()) && replace == 4, "{items:?} {replace}");
+    // Values: literals of the expected type, inside or outside a string.
+    let (items, replace) = completions(&dir, &format!("{PRELUDE}\nlet s = Svc {{ spec: {{ type: \"Cl‸ }} }}"));
+    assert!(items.contains(&"\"ClusterIP\"".to_string()) && replace == 3, "{items:?} {replace}");
+    has("let e: Env = ‸", &["\"dev\"", "\"prod\""], &[]);
+    has("let a = 1\nlet n: Int = ‸", &["a"], &[]);
+    // Members after `.`.
+    has("fn f(m: Meta) -> Str = m.‸", &["name", "labels"], &[]);
+    // Patch paths.
+    has(&format!("{DEPLOY}let x = base with {{ spec.‸ }}"), &["replicas: ", "containers: "], &[]);
+}
+
+#[test]
+fn completion_in_imported_namespaces() {
+    let dir = fixture_dir("complete-ns", &[("api.json", SWAGGER), ("lib.cleat", LIB)]);
+    let (items, _) = completions(&dir, "import * as t from \"api.json\"\nlet x = t.‸");
+    assert!(items.contains(&"Site".to_string()) && items.contains(&"web".to_string()), "{items:?}");
+    let (items, _) = completions(&dir, "import * as lib from \"lib.cleat\"\nlet x = lib.‸");
+    assert!(items.contains(&"app".to_string()) && items.contains(&"team".to_string()), "{items:?}");
+    // Keys of an imported schema type, and its docs.
+    let src = "import * as t from \"api.json\"\nlet s = t.Site { spec: { ‸ } }";
+    let (before, after) = src.split_once('‸').unwrap();
+    let c = cleat::complete::complete(&format!("{before}{after}"), 1, before.rsplit('\n').next().unwrap().chars().count(), Some(&dir), None).unwrap();
+    let host = c.items.iter().find(|i| i.label == "host").expect("host");
+    assert_eq!(host.doc.as_deref(), Some("The host name."));
+    assert!(c.items[0].preferred, "required fields come first");
+}
+
+#[test]
+fn go_to_definition() {
+    let dir = fixture_dir("definition", &[("lib.cleat", LIB)]);
+    let src = "import * as lib from \"lib.cleat\"\nfn twice(x: Int) -> Int = x * 2\nlet a = twice(if lib.team == \"x\" then 1 else 2)\nlet b = lib.app(\"x\")";
+    let def = |line: usize, col: usize| cleat::complete::definition(src, line, col, Some(&dir), None);
+    assert_eq!(def(2, 9).map(|(f, s)| (f, s.line)), Some((None, 2))); // `twice` -> its fn
+    let (file, span) = def(3, 13).expect("lib.app");
+    assert!(file.unwrap().ends_with("lib.cleat"));
+    assert_eq!(span.line, 7); // `fn app` in LIB
+    let (file, _) = def(0, 25).expect("import path");
+    assert!(file.unwrap().ends_with("lib.cleat"));
+}

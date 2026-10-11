@@ -98,8 +98,16 @@ checks parameters, patches, sync waves and their order, and error reporting.
 
 ## Editor support
 
-`cleat lsp` is a Language Server (stdio) with diagnostics as you type and
-hover for types, fields and functions; it works with any LSP client.
+`cleat lsp` is a Language Server (stdio) that works with any LSP client:
+
+- diagnostics as you type;
+- completion of object keys (from the expected type, including Kubernetes and
+  CRD types, with their docs; keys already set are left out, required ones
+  come first), field names after `.`, members of imported modules, `with`
+  patch paths, and values (enum literals, variables and functions that fit);
+- hover for types, fields and functions, with OpenAPI descriptions;
+- go to definition for functions, constants, types, imported module members
+  and import paths.
 
 For VS Code (no npm needed):
 
