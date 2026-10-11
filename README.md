@@ -20,7 +20,8 @@
 > [!WARNING]
 > **Cleat is under active development.** The language, the CLI and the
 > editor and Argo CD integrations can change in incompatible ways between
-> commits, and it hasn't been used in production yet.
+> commits, and it hasn't been used in production yet. It isn't accepting
+> code contributions yet, but issues and feedback are welcome.
 
 ## A taste
 
@@ -219,7 +220,7 @@ throwaway kind cluster.
 - [examples/](examples/): the quickstart above, a web app, and a shared base with a production overlay
 - [deploy/argocd/](deploy/argocd/): the Argo CD plugin, sidecar image and end-to-end test
 - [AGENTS.md](AGENTS.md): how the code is organized, and how to build, test and contribute
-- [CONTRIBUTING.md](CONTRIBUTING.md): pull requests, sign-off, and licensing of contributions
+- [CONTRIBUTING.md](CONTRIBUTING.md): how contributions will work (not open yet), sign-off, and licensing
 
 ## License
 
