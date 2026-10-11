@@ -66,6 +66,7 @@ Paths below are in `crates/cleat-core/src/` unless they say otherwise.
 | `modules.rs` | Import loading through the host, caching by stamp, dependency recording |
 | `openapi.rs` | OpenAPI/CRD → Cleat type source; the curated `KUBERNETES_ENUMS` table |
 | `targets.rs` | Output targets: `plain`, `argocd` (sync waves), `flux` (`dependsOn`) |
+| `diff.rs` | Line diffs (LCS) and unified-diff hunks of rendered YAML |
 | `emit.rs`, `json.rs` | YAML/JSON output with safe quoting; JSON input |
 | `complete.rs` | Completion probes and syntactic go-to-definition |
 | `crates/cleat/src/fs.rs` | `FsHost`: files on disk, the editor-buffer overlay, path confinement after symlinks, project roots, inputs files |
@@ -73,6 +74,7 @@ Paths below are in `crates/cleat-core/src/` unless they say otherwise.
 | `crates/cleat/src/yaml.rs` | YAML input (CRDs, data imports, inputs files) |
 | `crates/cleat/src/lsp.rs` | Language server (stdio JSON-RPC, no LSP crate) |
 | `crates/cleat/src/view.rs`, `view/` | `cleat view`: a small localhost server (and `--out` snapshots) for the dashboard page in `view/` (plain HTML/CSS/JS, embedded with `include_str!`) |
+| `crates/cleat/src/compare.rs`, `git.rs` | `cleat diff` / `view --diff`: evaluating on any session, comparing outputs, and `GitHost` (files at a revision; git-ignored files from the working tree) |
 | `crates/cleat/src/main.rs` | CLI, including `cleat argocd generate|params` for the Argo CD plugin |
 | `crates/cleat-wasm/src/lib.rs` | The playground's WebAssembly interface: one JSON-in, JSON-out call over a `MemHost` |
 | `site/playground/` | The playground page: editor, highlighting, hover, completion, inputs, share links. Its Resources tab embeds the `cleat view` page (`?embed=1`, state sent by `postMessage`), which `site/build.sh` copies from `crates/cleat/src/view/` |

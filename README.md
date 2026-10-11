@@ -217,6 +217,10 @@ their config connect, updating as you edit. It also flags what the type
 checker can't see, such as a Service that selects no workload or an Ingress
 pointing at a missing Service. `--out view.html` writes a static snapshot.
 
+`cleat diff app.cleat --base main` shows what your change does to the
+rendered resources (added, changed and removed, with a YAML diff of each),
+and `cleat view --diff main` marks the same changes on the map.
+
 ### Argo CD
 
 Cleat runs as an Argo CD

@@ -9,6 +9,7 @@ usage:
   cleat check  <file.cleat> [--vcs]
   cleat export <file.cleat> [options]
   cleat view   <file.cleat>  the exported resources in a browser, live
+  cleat diff   <file.cleat>  what the output changes compared with a git revision
   cleat gen <schema>         print Cleat types for an OpenAPI document or CRD file
   cleat lsp                  language server on stdio (used by editors)
   cleat argocd generate      Argo CD plugin: export $ARGOCD_ENV_CLEAT_FILE (default main.cleat)
@@ -34,7 +35,12 @@ export options:
 view options (also: --input, --set, --target plain|argocd):
   --port <n>               port on 127.0.0.1 (default: any free port)
   --no-open                don't open a browser
-  --out <file.html>        write a self-contained snapshot instead of serving";
+  --out <file.html>        write a self-contained snapshot instead of serving
+  --diff <rev>             mark what changed compared with a git revision (branch, tag, commit)
+
+diff options (also: --input, --set, --target plain|argocd):
+  --base <rev>             the git revision to compare with (required)
+  --exit-code              exit with status 1 when anything changed";
 
 struct Opts {
     file: String,
@@ -50,6 +56,9 @@ struct Opts {
     flux: FluxOptions,
     port: u16,
     open: bool,
+    /// `view --diff` / `diff --base`: the git revision to compare with.
+    base_rev: Option<String>,
+    exit_code: bool,
 }
 
 fn main() -> ExitCode {
@@ -135,6 +144,7 @@ fn main() -> ExitCode {
         "check" => check(&opts, &src),
         "export" => export(opts, &src),
         "view" => view(opts),
+        "diff" => diff(opts),
         _ => {
             eprintln!("{USAGE}");
             ExitCode::from(2)
@@ -161,6 +171,8 @@ fn parse_opts(args: &[String]) -> Result<Opts, String> {
         },
         port: 0,
         open: true,
+        base_rev: None,
+        exit_code: false,
     };
     let mut it = args.iter();
     while let Some(a) = it.next() {
@@ -190,6 +202,8 @@ fn parse_opts(args: &[String]) -> Result<Opts, String> {
             "--flux-prefix" => o.flux.prefix = val()?,
             "--port" => o.port = val()?.parse().map_err(|_| "--port expects a port number".to_string())?,
             "--no-open" => o.open = false,
+            "--diff" | "--base" => o.base_rev = Some(val()?),
+            "--exit-code" => o.exit_code = true,
             s if s.starts_with("--") => return Err(format!("unknown option {s}")),
             s if o.file.is_empty() => o.file = s.to_string(),
             s => return Err(format!("unexpected argument {s}")),
@@ -343,11 +357,22 @@ fn view(opts: Opts) -> ExitCode {
         return ExitCode::from(2);
     }
     let root = project_root(&opts);
+    let diff = match &opts.base_rev {
+        None => None,
+        Some(rev) => match cleat::compare::Base::new(std::path::Path::new(&opts.file), rev) {
+            Ok(b) => Some(b),
+            Err(e) => {
+                eprintln!("error: --diff: {e}");
+                return ExitCode::from(2);
+            }
+        },
+    };
     let cfg = cleat::view::ViewConfig {
         file: std::path::PathBuf::from(&opts.file),
         root,
         inputs: opts.inputs,
         target: opts.target,
+        diff,
     };
     if let Some(out) = &opts.out {
         return match std::fs::write(out, cleat::view::snapshot(&cfg)) {
@@ -374,6 +399,151 @@ fn view(opts: Opts) -> ExitCode {
             eprintln!("error: cannot serve: {e}");
             ExitCode::FAILURE
         }
+    }
+}
+
+/// `cleat diff`: what the working tree's output changes compared with a git revision.
+fn diff(opts: Opts) -> ExitCode {
+    use cleat::compare::{Base, compare, evaluate, field, resource_key};
+    let Some(rev) = &opts.base_rev else {
+        eprintln!("error: cleat diff needs --base <rev>");
+        return ExitCode::from(2);
+    };
+    if !matches!(opts.target.as_str(), "plain" | "argocd") {
+        eprintln!("error: cleat diff supports --target plain or argocd");
+        return ExitCode::from(2);
+    }
+    let file = std::path::Path::new(&opts.file);
+    let base = match Base::new(file, rev) {
+        Ok(b) => b,
+        Err(e) => {
+            eprintln!("error: {e}");
+            return ExitCode::from(2);
+        }
+    };
+    let root = project_root(&opts);
+    let src = std::fs::read_to_string(file).unwrap_or_default();
+    let root_s = root.as_ref().map(|r| r.to_string_lossy().into_owned());
+    let head = evaluate(
+        &cleat::session(),
+        &opts.file,
+        &src,
+        root_s.as_deref(),
+        opts.inputs.clone(),
+        &opts.target,
+        false,
+    );
+    let b = base.evaluate(file, root.as_deref(), &opts.inputs, &opts.target);
+    let print_errors = |which: &str, errors: &Value| {
+        if let Value::List(es) = errors {
+            for e in es {
+                let at = match (e.get("line"), e.get("col")) {
+                    (Some(Value::Int(l)), Some(Value::Int(c))) if *l > 0 => format!("{}:{l}:{c}: ", opts.file),
+                    _ => String::new(),
+                };
+                let msg = match e.get("msg") {
+                    Some(Value::Str(m)) => m.as_str(),
+                    _ => "",
+                };
+                eprintln!("{at}error ({which}): {msg}");
+            }
+        }
+    };
+    let mut failed = false;
+    if let Some(e) = field(&head, "errors") {
+        print_errors("working tree", e);
+        failed = true;
+    }
+    if let Some(e) = field(&b, "errors") {
+        print_errors(&base.label, e);
+        failed = true;
+    }
+    if failed {
+        return ExitCode::from(2);
+    }
+    let list = |f: &[(&'static str, Value)]| match field(f, "resources") {
+        Some(Value::List(rs)) => rs.clone(),
+        _ => Vec::new(),
+    };
+    let mut head_rs = list(&head);
+    let removed = compare(&mut head_rs, &list(&b));
+    let color = std::io::IsTerminal::is_terminal(&std::io::stdout());
+    let paint = |code: &str, text: &str| {
+        if color {
+            format!("\x1b[{code}m{text}\x1b[0m")
+        } else {
+            text.to_string()
+        }
+    };
+    let label = |r: &Value| {
+        let k = r.get("doc").map(resource_key).unwrap_or_default();
+        let mut parts = k.splitn(3, '/');
+        let (kind, ns, name) = (
+            parts.next().unwrap_or(""),
+            parts.next().unwrap_or(""),
+            parts.next().unwrap_or(""),
+        );
+        if ns.is_empty() {
+            format!("{kind} {name}")
+        } else {
+            format!("{kind} {ns}/{name}")
+        }
+    };
+    let change = |r: &Value| match r.get("change") {
+        Some(Value::Str(c)) => c.clone(),
+        _ => String::new(),
+    };
+    let (mut added, mut changed, mut same) = (0, 0, 0);
+    let mut details = String::new();
+    println!("Comparing {} with {}:", opts.file, base.label);
+    if matches!(field(&b, "missing"), Some(Value::Bool(true))) {
+        println!("  ({} doesn't exist at {rev}, so everything is new)", opts.file);
+    }
+    for r in &head_rs {
+        match change(r).as_str() {
+            "added" => {
+                added += 1;
+                println!("  {}", paint("32", &format!("+ {}", label(r))));
+            }
+            "changed" => {
+                changed += 1;
+                println!("  {}", paint("33", &format!("~ {}", label(r))));
+                details.push_str(&format!("\n{}\n", paint("1", &format!("~ {}", label(r)))));
+                if let Some(Value::Str(d)) = r.get("diff") {
+                    for line in d.lines() {
+                        details.push_str(&match line.chars().next() {
+                            Some('+') => paint("32", line),
+                            Some('-') => paint("31", line),
+                            Some('@') => paint("36", line),
+                            _ => line.to_string(),
+                        });
+                        details.push('\n');
+                    }
+                }
+            }
+            _ => same += 1,
+        }
+    }
+    for r in &removed {
+        println!("  {}", paint("31", &format!("- {}", label(r))));
+    }
+    let n = added + changed + removed.len();
+    if n == 0 {
+        println!(
+            "  no changes ({same} resource{} unchanged)",
+            if same == 1 { "" } else { "s" }
+        );
+    } else {
+        println!(
+            "{added} added, {changed} changed, {} removed ({same} unchanged)",
+            removed.len()
+        );
+    }
+    print!("{details}");
+    if opts.exit_code && n > 0 {
+        ExitCode::FAILURE
+    } else {
+        ExitCode::SUCCESS
     }
 }
 
@@ -447,6 +617,8 @@ fn argocd(sub: Option<&str>) -> ExitCode {
                 },
                 port: 0,
                 open: false,
+                base_rev: None,
+                exit_code: false,
             };
             export(opts, &src)
         }

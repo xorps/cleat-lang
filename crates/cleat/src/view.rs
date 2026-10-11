@@ -9,9 +9,11 @@
 
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{TcpListener, TcpStream};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
-use cleat_core::{ExportError, InputValue, Value, emit, json, targets};
+use cleat_core::{InputValue, Value, emit, json};
+
+use crate::compare::{Base, compare, evaluate, field, obj, raw_input, s};
 
 const INDEX: &str = include_str!("view/index.html");
 const CSS: &str = include_str!("view/view.css");
@@ -24,51 +26,20 @@ pub struct ViewConfig {
     pub inputs: Vec<(String, InputValue)>,
     /// `plain` or `argocd`; Argo CD adds sync-wave annotations to the documents.
     pub target: String,
+    /// With `--diff <rev>`: the program at that revision, to mark what changed.
+    pub diff: Option<Base>,
 }
 
 /// The page's data: problems, inputs, components and resources, as JSON.
 /// `ui_inputs`, when the page sends them, replace the command-line inputs.
 pub fn state(cfg: &ViewConfig, ui_inputs: Option<Vec<(String, String)>>) -> Value {
     let name = cfg.file.display().to_string();
-    let s = |x: &str| Value::Str(x.to_string());
-    let obj = |pairs: Vec<(&str, Value)>| Value::Obj(pairs.into_iter().map(|(k, v)| (k.to_string(), v)).collect());
-    let diag = |span: cleat_core::diag::Span, msg: &str| {
-        obj(vec![
-            ("line", Value::Int(span.line as i64)),
-            ("col", Value::Int(span.col as i64)),
-            ("msg", s(msg)),
-        ])
-    };
     let mut out = vec![("file", s(&name)), ("target", s(&cfg.target))];
     let src = match std::fs::read_to_string(&cfg.file) {
         Ok(src) => src,
         Err(e) => {
-            out.push((
-                "errors",
-                Value::List(vec![obj(vec![("msg", s(&format!("cannot read {name}: {e}")))])]),
-            ));
-            return obj(out);
-        }
-    };
-    let base = cfg.file.parent().map(Path::to_path_buf);
-    let (base, root) = (base.as_deref(), cfg.root.as_deref());
-
-    let cli_raw = |v: &InputValue| match v {
-        InputValue::Raw(r) => r.clone(),
-        InputValue::Json(Value::Str(x)) => x.clone(),
-        InputValue::Json(v) => emit::to_json(v, false),
-        InputValue::RawList(xs) => emit::to_json(&Value::List(xs.iter().map(|x| s(x)).collect()), false),
-        InputValue::RawMap(es) => {
-            emit::to_json(&Value::Obj(es.iter().map(|(k, v)| (k.clone(), s(v))).collect()), false)
-        }
-    };
-    let infos = match crate::inputs(&src, base, root) {
-        Ok(infos) => infos,
-        Err(outcome) => {
-            out.push((
-                "errors",
-                Value::List(outcome.errors.iter().map(|d| diag(d.span, &d.msg)).collect()),
-            ));
+            let msg = obj(vec![("msg", s(&format!("cannot read {name}: {e}")))]);
+            out.push(("errors", Value::List(vec![msg])));
             return obj(out);
         }
     };
@@ -80,64 +51,59 @@ pub fn state(cfg: &ViewConfig, ui_inputs: Option<Vec<(String, String)>>) -> Valu
             .collect(),
         None => cfg.inputs.clone(),
     };
-    out.push((
-        "inputs",
-        Value::List(
-            infos
+    let root = cfg.root.as_ref().map(|r| r.to_string_lossy().into_owned());
+    let mut fields = evaluate(
+        &crate::session(),
+        &name,
+        &src,
+        root.as_deref(),
+        inputs.clone(),
+        &cfg.target,
+        false,
+    );
+    // The page shows the command line's values as the starting point.
+    if let Some((_, Value::List(infos))) = fields.iter_mut().find(|(k, _)| *k == "inputs") {
+        for info in infos.iter_mut() {
+            let n = match info.get("name") {
+                Some(Value::Str(n)) => n.clone(),
+                _ => continue,
+            };
+            let given = cfg
+                .inputs
                 .iter()
-                .map(|i| {
-                    let given = cfg
-                        .inputs
-                        .iter()
-                        .rev()
-                        .find(|(n, _)| *n == i.name)
-                        .map(|(_, v)| cli_raw(v));
-                    obj(vec![
-                        ("name", s(&i.name)),
-                        ("ty", s(&i.ty)),
-                        ("definition", i.definition.as_deref().map_or(Value::Null, s)),
-                        ("required", Value::Bool(i.required)),
-                        (
-                            "default",
-                            i.default.as_ref().map_or(Value::Null, |d| s(&emit::to_json(d, false))),
-                        ),
-                        ("given", given.map_or(Value::Null, |g| s(&g))),
-                    ])
-                })
-                .collect(),
-        ),
-    ));
-    match crate::export_in(&src, base, root, inputs) {
-        Err(ExportError::Check(outcome)) => {
-            out.push((
-                "errors",
-                Value::List(outcome.errors.iter().map(|d| diag(d.span, &d.msg)).collect()),
-            ));
-        }
-        Err(ExportError::Eval(errs)) => {
-            let list = errs
-                .iter()
-                .map(|e| {
-                    let span = e.trace.first().map_or(e.span, |(_, at)| *at);
-                    diag(span, &e.msg)
-                })
-                .collect();
-            out.push(("errors", Value::List(list)));
-        }
-        Ok((outcome, comps)) => {
-            out.push((
-                "warnings",
-                Value::List(outcome.warnings.iter().map(|d| diag(d.span, &d.msg)).collect()),
-            ));
-            match targets::view_data(&comps, &cfg.target) {
-                Ok((components, resources)) => {
-                    out.push(("components", components));
-                    out.push(("resources", resources));
-                }
-                Err(e) => out.push(("errors", Value::List(vec![obj(vec![("msg", s(&e))])]))),
+                .rev()
+                .find(|(k, _)| *k == n)
+                .map(|(_, v)| raw_input(v));
+            if let Value::Obj(es) = info
+                && let Some(slot) = es.iter_mut().find(|(k, _)| k == "given")
+            {
+                slot.1 = given.map_or(Value::Null, |g| s(&g));
             }
         }
     }
+    if let Some(base) = &cfg.diff {
+        let b = base.evaluate(&cfg.file, cfg.root.as_deref(), &inputs, &cfg.target);
+        let base_resources = match field(&b, "resources") {
+            Some(Value::List(rs)) => rs.clone(),
+            _ => Vec::new(),
+        };
+        let mut info = vec![("label", s(&base.label))];
+        if let Some(errors) = field(&b, "errors") {
+            info.push(("errors", errors.clone()));
+        }
+        if matches!(field(&b, "missing"), Some(Value::Bool(true))) {
+            info.push(("missing", Value::Bool(true)));
+        }
+        // Without a base to compare with (it doesn't check), nothing is marked.
+        if field(&b, "errors").is_none()
+            && let Some((_, Value::List(head))) = fields.iter_mut().find(|(k, _)| *k == "resources")
+        {
+            let removed = compare(head, &base_resources);
+            info.push(("removed", Value::List(removed)));
+        }
+        out.push(("base", obj(info)));
+    }
+    out.extend(fields);
     obj(out)
 }
 
