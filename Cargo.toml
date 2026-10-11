@@ -1,19 +1,13 @@
-[package]
-name = "cleat-lang"
+[workspace]
+resolver = "3"
+members = ["crates/cleat-core", "crates/cleat"]
+
+[workspace.package]
 version = "0.1.0"
 edition = "2024"
 license = "Apache-2.0"
-
-[lib]
-name = "cleat"
-
-[[bin]]
-name = "cleat"
-path = "src/bin/cleat.rs"
-
-[dependencies]
-regex = "1"
-yaml-rust2 = "0.10"
+repository = "https://github.com/xorps/cleat-lang"
+publish = false
 
 [profile.release]
 strip = true

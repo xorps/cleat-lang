@@ -5,12 +5,13 @@
 //! closed, and the result is type-checked. The checker records what fits
 //! where it meets the placeholder (`check::COMPLETE_NAME` / `COMPLETE_VALUE`).
 
-use std::path::{Path, PathBuf};
+use crate::host::{Session, extension};
+use crate::prelude::*;
 
 use crate::ast::{ImportForm, Item};
 use crate::check::{COMPLETE_NAME, COMPLETE_VALUE, Completion};
 use crate::diag::Span;
-use crate::{check_source_in, parser};
+use crate::{check_source, parser};
 
 pub struct Completions {
     pub items: Vec<Completion>,
@@ -214,7 +215,14 @@ fn offset(cs: &[char], line: usize, col: usize) -> usize {
 }
 
 /// Completions at a 0-based (line, character) position, counting characters.
-pub fn complete(src: &str, line: usize, col: usize, base: Option<&Path>, root: Option<&Path>) -> Option<Completions> {
+pub fn complete(
+    sess: &Session,
+    src: &str,
+    line: usize,
+    col: usize,
+    base: Option<&str>,
+    root: Option<&str>,
+) -> Option<Completions> {
     let cs: Vec<char> = src.chars().collect();
     let cur = offset(&cs, line, col);
     let before = &cs[..cur];
@@ -299,9 +307,9 @@ pub fn complete(src: &str, line: usize, col: usize, base: Option<&Path>, root: O
     };
     probe.push_str(&closers(&sc.frames));
     // A declaration cut off before its value (`fn f(x: ‸)`, `let s: T‸`) needs one to parse.
-    let mut items = match check_source_in(&format!("{probe}\n"), base, root).completions {
+    let mut items = match check_source(sess, &format!("{probe}\n"), base, root).completions {
         Some(items) => items,
-        None => check_source_in(&format!("{probe} = null\n"), base, root).completions?,
+        None => check_source(sess, &format!("{probe} = null\n"), base, root).completions?,
     };
     // The probe ends at the cursor; leave out keys the object sets further down.
     items.retain(|i| !(i.insert.ends_with(": ") && set_below.contains(&i.label)));
@@ -312,16 +320,17 @@ pub fn complete(src: &str, line: usize, col: usize, base: Option<&Path>, root: O
 /// Where the name at a 0-based (line, character) position is defined:
 /// `(None, span)` in this file, or `(Some(file), span)` in another.
 pub fn definition(
+    sess: &Session,
     src: &str,
     line: usize,
     col: usize,
-    base: Option<&Path>,
-    root: Option<&Path>,
-) -> Option<(Option<PathBuf>, Span)> {
+    base: Option<&str>,
+    root: Option<&str>,
+) -> Option<(Option<String>, Span)> {
     let cs: Vec<char> = src.chars().collect();
     let cur = offset(&cs, line, col);
     let items = parser::parse_program(src).ok()?;
-    let resolve = |p: &str| crate::modules::resolve_import(base, root, p).ok();
+    let resolve = |p: &str| sess.host().resolve(base, root, p).ok();
 
     // On an import's path: open that file.
     let line_text: String = src.lines().nth(line)?.to_string();
@@ -371,12 +380,12 @@ pub fn definition(
             _ => None,
         })
     };
-    let in_module = |path: &str, n: &str| -> Option<(Option<PathBuf>, Span)> {
+    let in_module = |path: &str, n: &str| -> Option<(Option<String>, Span)> {
         let full = resolve(path)?;
-        if full.extension().and_then(|e| e.to_str()) != Some("cleat") {
+        if extension(&full) != Some("cleat") {
             return None;
         }
-        let module_items = parser::parse_program(&std::fs::read_to_string(&full).ok()?).ok()?;
+        let module_items = parser::parse_program(&sess.host().read(&full).ok()?).ok()?;
         Some((Some(full), find_in(&module_items, n)?))
     };
 

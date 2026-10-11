@@ -1,4 +1,5 @@
 use crate::diag::{Diag, Span};
+use crate::prelude::*;
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum StrPart {
@@ -336,7 +337,7 @@ impl Lexer {
                         '\\' => cur.push('\\'),
                         '(' => {
                             if !cur.is_empty() {
-                                parts.push(StrPart::Lit(std::mem::take(&mut cur)));
+                                parts.push(StrPart::Lit(core::mem::take(&mut cur)));
                             }
                             parts.push(StrPart::Interp(self.tokens(true)?));
                         }

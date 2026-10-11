@@ -1,0 +1,11 @@
+[package]
+name = "cleat-core"
+description = "The Cleat language: parser, checker and evaluator (no_std, no I/O)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+regex-automata = { version = "0.4", default-features = false, features = ["alloc", "syntax", "meta", "nfa-pikevm", "nfa-backtrack", "hybrid", "dfa-onepass", "unicode", "perf-inline"] }

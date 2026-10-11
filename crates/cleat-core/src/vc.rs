@@ -3,7 +3,8 @@
 //! `triage` decides what it can by evaluating closed goals and matching known
 //! facts; everything else is checked at runtime during evaluation.
 
-use std::fmt;
+use crate::prelude::*;
+use core::fmt;
 
 use crate::ast::{BinOp, Expr, ExprKind};
 use crate::diag::Span;

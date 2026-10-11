@@ -2,7 +2,7 @@
 
 use yaml_rust2::{Yaml, YamlLoader};
 
-use crate::eval::Value;
+use cleat_core::Value;
 
 /// All documents of a YAML stream.
 pub fn parse_docs(src: &str) -> Result<Vec<Value>, String> {

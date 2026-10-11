@@ -49,7 +49,7 @@ fn yaml(s: &str, inputs: &[(&str, &str)]) -> String {
 
 #[test]
 fn webapp_example_checks_and_exports() {
-    let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("examples");
+    let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples");
     if !dir.join("../schemas/kubernetes-1.37.json").exists() {
         eprintln!("skipping: run schemas/fetch.sh to download the Kubernetes schema");
         return;
@@ -534,7 +534,7 @@ spec:
 #[test]
 fn crd_import() {
     let dir = fixture_dir("crd", &[("widgets.yaml", CRD)]);
-    let src = cleat::modules::generate_source(&dir.join("widgets.yaml")).unwrap();
+    let src = cleat::generate_source(&dir.join("widgets.yaml")).unwrap();
     assert!(src.contains("type v1.WidgetSpec = {"), "{src}");
     assert!(src.contains("parts?: [v1.WidgetSpecPartsItem],"), "{src}");
     assert!(src.contains("type Widget = v1.Widget"), "storage version wins:\n{src}");
@@ -1154,7 +1154,7 @@ fn completion_of_types_type_patches_and_patterns() {
 
 #[test]
 fn kubernetes_enums_match_the_schema() {
-    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("schemas/kubernetes-1.37.json");
+    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../schemas/kubernetes-1.37.json");
     if !path.exists() {
         eprintln!("skipping: run schemas/fetch.sh to download the Kubernetes schema");
         return;

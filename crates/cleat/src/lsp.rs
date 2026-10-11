@@ -6,7 +6,7 @@ use std::io::{self, BufRead, Write};
 use std::panic::{AssertUnwindSafe, catch_unwind};
 
 use crate::check::{Hover, Outcome};
-use crate::diag::Span;
+use crate::diag::{Span, token_len};
 use crate::eval::Value;
 use crate::{check_source_in, emit, json};
 use std::path::{Path, PathBuf};
@@ -74,7 +74,7 @@ pub fn run() -> io::Result<()> {
                 let u = uri();
                 docs.remove(&u);
                 if let Some(p) = uri_to_path(&u) {
-                    crate::modules::clear_overlay(&p);
+                    crate::fs_host().clear_overlay(&p);
                 }
                 publish(&mut out, &u, Vec::new())?;
                 recheck_others(&mut out, &mut docs, &u)?;
@@ -117,7 +117,7 @@ pub fn run() -> io::Result<()> {
 /// document is re-checked (cached modules notice what changed underneath them).
 fn changed(out: &mut impl Write, docs: &mut HashMap<String, Doc>, uri: String, text: String) -> io::Result<()> {
     if let Some(p) = uri_to_path(&uri) {
-        crate::modules::set_overlay(&p, text.clone());
+        crate::fs_host().set_overlay(&p, text.clone());
     }
     update(out, docs, uri.clone(), text)?;
     recheck_others(out, docs, &uri)
@@ -138,7 +138,7 @@ fn recheck_others(out: &mut impl Write, docs: &mut HashMap<String, Doc>, except:
 fn update(out: &mut impl Write, docs: &mut HashMap<String, Doc>, uri: String, text: String) -> io::Result<()> {
     let path = uri_to_path(&uri);
     let base = path.as_ref().and_then(|p| p.parent().map(Path::to_path_buf));
-    let root = path.as_deref().and_then(crate::modules::find_root);
+    let root = path.as_deref().and_then(crate::find_root);
     let result = catch_unwind(AssertUnwindSafe(|| {
         check_source_in(&text, base.as_deref(), root.as_deref())
     }));
@@ -258,7 +258,7 @@ fn hover(doc: &Doc, params: &Value) -> Option<Value> {
 fn dirs(uri: &str) -> (Option<PathBuf>, Option<PathBuf>) {
     let path = uri_to_path(uri);
     let base = path.as_ref().and_then(|p| p.parent().map(Path::to_path_buf));
-    let root = path.as_deref().and_then(crate::modules::find_root);
+    let root = path.as_deref().and_then(crate::find_root);
     (base, root)
 }
 
@@ -341,7 +341,7 @@ fn definition(uri: &str, doc: &Doc, params: &Value) -> Option<Value> {
         .filter(|h| h.span.line == l1 && h.span.col <= c1 && c1 < h.span.col + h.len as u32 && h.def.is_some())
         .min_by_key(|h| h.len)
         .and_then(|h| h.def.clone())
-        .map(|d| (d.file, d.span));
+        .map(|d| (d.file.map(PathBuf::from), d.span));
     let (file, span) = match resolved {
         Some(r) => r,
         None => crate::complete::definition(&doc.text, line, col, base.as_deref(), root.as_deref())?,
@@ -382,27 +382,6 @@ fn utf16_to_col(line: &str, units: usize) -> u32 {
         seen += c.len_utf16();
     }
     line.chars().count() as u32 + 1
-}
-
-/// Length of the token starting at `span`, so diagnostics underline a whole word.
-fn token_len(text: &str, span: Span) -> usize {
-    let Some(line) = text.lines().nth(span.line.saturating_sub(1) as usize) else {
-        return 1;
-    };
-    let rest: Vec<char> = line.chars().skip(span.col.saturating_sub(1) as usize).collect();
-    match rest.first() {
-        Some(c) if c.is_alphanumeric() || *c == '_' => rest
-            .iter()
-            .take_while(|c| c.is_alphanumeric() || **c == '_' || **c == '.')
-            .count(),
-        Some('"') => rest
-            .iter()
-            .skip(1)
-            .position(|c| *c == '"')
-            .map_or(rest.len(), |i| i + 2),
-        Some(_) => 1,
-        None => 1,
-    }
 }
 
 // ---------- JSON-RPC framing ----------

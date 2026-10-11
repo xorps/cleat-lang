@@ -4,7 +4,7 @@
 //! The output is Cleat source, so it can be printed (`cleat gen`), vendored,
 //! and checked like any other module.
 
-use std::collections::{HashMap, HashSet};
+use crate::prelude::*;
 
 use crate::eval::Value;
 
@@ -140,13 +140,13 @@ fn first_line(s: &str) -> String {
 struct Gen {
     ref_prefix: String,
     /// Definition key -> local type name.
-    names: HashMap<String, String>,
+    names: BTreeMap<String, String>,
     /// References (from, to) that close a cycle; rendered as `Json`.
-    broken: HashSet<(String, String)>,
+    broken: BTreeSet<(String, String)>,
     cur_def: String,
     /// Name inline objects as their own types (CRDs inline everything).
     name_nested: bool,
-    taken: HashSet<String>,
+    taken: BTreeSet<String>,
     types: Vec<(String, String, Option<String>)>,
     docs: Vec<(String, String)>,
 }
@@ -155,11 +155,11 @@ impl Gen {
     fn new(ref_prefix: &str, name_nested: bool) -> Self {
         Gen {
             ref_prefix: ref_prefix.to_string(),
-            names: HashMap::new(),
-            broken: HashSet::new(),
+            names: BTreeMap::new(),
+            broken: BTreeSet::new(),
             cur_def: String::new(),
             name_nested,
-            taken: HashSet::new(),
+            taken: BTreeSet::new(),
             types: Vec::new(),
             docs: Vec::new(),
         }
@@ -280,9 +280,9 @@ impl Gen {
 
     /// A record type. `owner` names it for docs; `indent` empty means one line.
     fn record(&mut self, s: &Value, owner: &str, indent: &str) -> String {
-        let required: HashSet<&str> = match s.get("required") {
+        let required: BTreeSet<&str> = match s.get("required") {
             Some(Value::List(xs)) => xs.iter().filter_map(|x| str_of(Some(x))).collect(),
-            _ => HashSet::new(),
+            _ => BTreeSet::new(),
         };
         let open = s.get("additionalProperties") == Some(&Value::Bool(true))
             || s.get("x-kubernetes-preserve-unknown-fields") == Some(&Value::Bool(true));
@@ -373,7 +373,7 @@ fn string_preds(s: &Value) -> Vec<String> {
     }
     // Patterns Rust's regex engine can't compile (e.g. lookaround) are skipped.
     if let Some(re) = str_of(s.get("pattern"))
-        && regex::Regex::new(re).is_ok()
+        && crate::host::compile_regex(re).is_ok()
     {
         p.push(format!("matches(self, {})", lit_str(re)));
     }
@@ -399,16 +399,16 @@ fn collect_refs(s: &Value, prefix: &str, out: &mut Vec<String>) {
 }
 
 /// Mark references that close cycles, so the remaining graph is acyclic.
-fn break_cycles(defs: &[(String, &Value)], prefix: &str) -> HashSet<(String, String)> {
-    let index: HashMap<&str, &Value> = defs.iter().map(|(k, v)| (k.as_str(), *v)).collect();
-    let mut state: HashMap<String, u8> = HashMap::new(); // 1 = on stack, 2 = done
-    let mut broken = HashSet::new();
+fn break_cycles(defs: &[(String, &Value)], prefix: &str) -> BTreeSet<(String, String)> {
+    let index: BTreeMap<&str, &Value> = defs.iter().map(|(k, v)| (k.as_str(), *v)).collect();
+    let mut state: BTreeMap<String, u8> = BTreeMap::new(); // 1 = on stack, 2 = done
+    let mut broken = BTreeSet::new();
     fn dfs(
         k: &str,
-        index: &HashMap<&str, &Value>,
+        index: &BTreeMap<&str, &Value>,
         prefix: &str,
-        state: &mut HashMap<String, u8>,
-        broken: &mut HashSet<(String, String)>,
+        state: &mut BTreeMap<String, u8>,
+        broken: &mut BTreeSet<(String, String)>,
     ) {
         state.insert(k.to_string(), 1);
         let mut refs = Vec::new();
@@ -743,7 +743,7 @@ fn from_openapi(doc: &Value) -> Result<Generated, String> {
     }
 
     // Short names: `Deployment` for `apps.v1.Deployment` when one version clearly wins.
-    let mut by_short: HashMap<String, Vec<String>> = HashMap::new();
+    let mut by_short: BTreeMap<String, Vec<String>> = BTreeMap::new();
     for name in g.names.values() {
         if let Some(short) = name.rsplit('.').next().filter(|s| *s != name) {
             by_short.entry(short.to_string()).or_default().push(name.clone());
@@ -762,7 +762,7 @@ fn from_openapi(doc: &Value) -> Result<Generated, String> {
                 .and_then(|v| version_rank(v))
                 .unwrap_or((2, 0, 0))
         };
-        cands.sort_by_key(|c| std::cmp::Reverse(rank(c)));
+        cands.sort_by_key(|c| core::cmp::Reverse(rank(c)));
         if cands.len() == 1 || rank(&cands[0]) > rank(&cands[1]) {
             shorts.push((short, cands[0].clone()));
         }
@@ -788,7 +788,7 @@ fn from_crds(crds: &[&Value]) -> Result<Generated, String> {
     );
 
     // kind -> (type name, version rank, is the storage version)
-    let mut kinds: HashMap<String, Vec<(String, VersionRank, bool)>> = HashMap::new();
+    let mut kinds: BTreeMap<String, Vec<(String, VersionRank, bool)>> = BTreeMap::new();
     for crd in crds {
         let spec = crd.get("spec").ok_or("CRD without `spec`")?;
         let group = str_of(spec.get("group")).ok_or("CRD without `spec.group`")?;
@@ -857,7 +857,7 @@ fn from_crds(crds: &[&Value]) -> Result<Generated, String> {
         if vs.iter().any(|(n, _, _)| n.split('.').count() > 2) {
             continue;
         }
-        vs.sort_by_key(|(_, r, storage)| std::cmp::Reverse((*storage, *r)));
+        vs.sort_by_key(|(_, r, storage)| core::cmp::Reverse((*storage, *r)));
         shorts.push((kind, vs[0].0.clone()));
     }
     shorts.sort();

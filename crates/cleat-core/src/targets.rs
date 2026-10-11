@@ -6,6 +6,7 @@
 
 use crate::emit;
 use crate::eval::{Component, Value};
+use crate::prelude::*;
 
 pub const SYNC_WAVE: &str = "argocd.argoproj.io/sync-wave";
 

@@ -1,6 +1,7 @@
 use crate::ast::*;
 use crate::diag::{Diag, Span};
 use crate::lexer::{StrPart, Tok, Token, lex};
+use crate::prelude::*;
 
 type PResult<T> = Result<T, Diag>;
 
@@ -700,7 +701,7 @@ impl Parser {
     // ---------- expressions ----------
 
     fn with_struct<T>(&mut self, allow: bool, f: impl FnOnce(&mut Self) -> PResult<T>) -> PResult<T> {
-        let old = std::mem::replace(&mut self.no_struct, !allow);
+        let old = core::mem::replace(&mut self.no_struct, !allow);
         let r = f(self);
         self.no_struct = old;
         r

@@ -1,5 +1,5 @@
-use std::collections::HashMap;
-use std::fmt;
+use crate::prelude::*;
+use core::fmt;
 
 use crate::ast::{BinOp, Expr, Lit, PatchOp, PathSeg, TypeExpr, TypeKind, fmt_key, fmt_path};
 use crate::diag::Diag;
@@ -260,17 +260,17 @@ pub fn implies(p: &Expr, q: &Expr) -> bool {
 /// Type aliases and the type algebra over them.
 #[derive(Debug, Default, Clone)]
 pub struct TypeCtx {
-    pub alias_src: HashMap<String, TypeExpr>,
-    pub aliases: HashMap<String, Ty>,
+    pub alias_src: BTreeMap<String, TypeExpr>,
+    pub aliases: BTreeMap<String, Ty>,
     resolving: Vec<String>,
     /// Set when resolution meets the completion placeholder (see `complete.rs`).
     pub completion: Option<TypeCompletion>,
     /// Where each alias is defined (for go-to-definition).
-    pub alias_defs: HashMap<String, crate::check::DefSite>,
+    pub alias_defs: BTreeMap<String, crate::check::DefSite>,
     /// Namespaces whose import failed: references into them are already explained.
-    pub failed_namespaces: std::collections::HashSet<String>,
+    pub failed_namespaces: BTreeSet<String>,
     /// Documentation for imported types and fields, keyed `ns.Type` / `ns.Type.field`.
-    pub docs: HashMap<String, String>,
+    pub docs: BTreeMap<String, String>,
     /// Diagnostics from resolution; the checker drains these.
     pub diags: Vec<Diag>,
 }
