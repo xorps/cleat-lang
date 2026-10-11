@@ -13,7 +13,8 @@
 //!   Imports resolve between them, confined to `/`.
 //! - `analyze { file, inputs: { name: "raw value" }, target: "plain" | "argocd" }`:
 //!   diagnostics, hovers, the declared inputs and, if it checks and
-//!   evaluates, the YAML output.
+//!   evaluates, the YAML output plus the components and resources that the
+//!   resource view (`cleat view`'s page) draws.
 //! - `complete { file, line, col }` (0-based, in characters): completion items.
 
 use std::cell::RefCell;
@@ -163,8 +164,13 @@ fn analyze(sess: &Session, file: &str, inputs: Vec<(String, InputValue)>, target
                 "argocd" => targets::argocd(&comps),
                 _ => Ok(targets::plain(&comps)),
             };
-            match docs {
-                Ok(docs) => out.push(("output", s(&emit::to_yaml_stream(&docs)))),
+            match docs.and_then(|docs| Ok((docs, targets::view_data(&comps, target)?))) {
+                Ok((docs, (components, resources))) => {
+                    out.push(("output", s(&emit::to_yaml_stream(&docs))));
+                    // For the resource view (the same page as `cleat view`).
+                    out.push(("components", components));
+                    out.push(("resources", resources));
+                }
                 Err(e) => out.push(("eval_errors", Value::List(vec![obj(vec![("msg", s(&e))])]))),
             }
         }

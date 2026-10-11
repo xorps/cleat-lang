@@ -303,3 +303,13 @@ button:hover, select:hover { border-color: var(--accent); }
   .output { min-height: 240px; }
   .complete-doc { display: none; }
 }
+
+.seg { display: inline-flex; border: 1px solid var(--border); border-radius: 7px; overflow: hidden; }
+.seg button { border: 0; border-radius: 0; padding: 3px 12px; background: none; color: var(--muted); font-size: 13px; }
+.seg button + button { border-left: 1px solid var(--border); }
+.seg button[aria-selected="true"] { background: var(--accent); color: #fff; }
+.output-head .spacer { flex: 1; }
+.output-head { gap: 8px; padding-bottom: 6px; }
+.resview { flex: 1; min-height: 0; width: 100%; border: 0; border-top: 1px solid var(--border); background: var(--bg); }
+@media (prefers-color-scheme: dark) { .seg button[aria-selected="true"] { color: #0b1422; } }
+@media (max-width: 900px) { .resview { min-height: 520px; } }

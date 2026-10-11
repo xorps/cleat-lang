@@ -31,7 +31,8 @@ const els = {
   files: $("files"), text: $("text"), hl: $("hl"), marks: $("marks"), lines: $("lines"),
   measure: $("measure"), problems: $("problems"), inputs: $("inputs"), output: $("output"),
   copy: $("copy"), tip: $("tip"), complete: $("complete"), completeList: $("complete-list"),
-  completeDoc: $("complete-doc"),
+  completeDoc: $("complete-doc"), tabYaml: $("tab-yaml"), tabRes: $("tab-res"), resview: $("resview"),
+  popout: $("popout"),
 };
 
 // ---------- WebAssembly ----------
@@ -107,7 +108,53 @@ function analyze() {
   renderOutput(r);
   renderProblems(r);
   renderMarks();
+  sendToViews();
 }
+
+// ---------- resource view ----------
+// The same page as `cleat view` (copied to view/ by site/build.sh), embedded
+// with ?embed=1: it asks for the state when it loads, and gets every update.
+
+const views = new Set(); // windows showing the resource view
+
+function viewState() {
+  const r = state.result || {};
+  return {
+    file: mainFile(),
+    target: els.target.value,
+    errors: [...(r.errors || []), ...(r.eval_errors || [])],
+    warnings: r.warnings || [],
+    inputs: [],
+    components: r.components || [],
+    resources: r.resources || [],
+  };
+}
+
+function sendToViews() {
+  for (const w of views) {
+    if (w.closed) views.delete(w);
+    else w.postMessage({ type: "cleat-state", state: viewState() }, location.origin);
+  }
+}
+
+addEventListener("message", (e) => {
+  if (e.origin !== location.origin || !e.data || e.data.type !== "cleat-view-ready") return;
+  views.add(e.source);
+  e.source.postMessage({ type: "cleat-state", state: viewState() }, location.origin);
+});
+
+function showTab(res) {
+  els.tabYaml.setAttribute("aria-selected", String(!res));
+  els.tabRes.setAttribute("aria-selected", String(res));
+  els.output.hidden = res;
+  els.copy.hidden = res;
+  els.resview.hidden = !res;
+  els.popout.hidden = !res;
+  if (res && !els.resview.src) els.resview.src = "view/index.html?embed=1#view=map";
+}
+els.tabYaml.onclick = () => showTab(false);
+els.tabRes.onclick = () => showTab(true);
+els.popout.onclick = () => window.open("view/index.html?embed=1#view=map", "_blank");
 
 // ---------- editor ----------
 

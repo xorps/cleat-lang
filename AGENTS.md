@@ -75,7 +75,7 @@ Paths below are in `crates/cleat-core/src/` unless they say otherwise.
 | `crates/cleat/src/view.rs`, `view/` | `cleat view`: a small localhost server (and `--out` snapshots) for the dashboard page in `view/` (plain HTML/CSS/JS, embedded with `include_str!`) |
 | `crates/cleat/src/main.rs` | CLI, including `cleat argocd generate|params` for the Argo CD plugin |
 | `crates/cleat-wasm/src/lib.rs` | The playground's WebAssembly interface: one JSON-in, JSON-out call over a `MemHost` |
-| `site/playground/` | The playground page: editor, highlighting, hover, completion, inputs, share links |
+| `site/playground/` | The playground page: editor, highlighting, hover, completion, inputs, share links. Its Resources tab embeds the `cleat view` page (`?embed=1`, state sent by `postMessage`), which `site/build.sh` copies from `crates/cleat/src/view/` |
 | `site/docs/` | The documentation (mdBook); `reference/spec.md` includes `SPEC.md` |
 | `editors/vscode/` | Extension: TextMate grammar, a small LSP client, live preview |
 | `deploy/argocd/` | Plugin config, distroless sidecar Dockerfile, repo-server patch, e2e test |

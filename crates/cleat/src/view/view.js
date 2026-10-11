@@ -1,6 +1,8 @@
 // cleat view: the exported resources as a cluster-style dashboard.
-// Served by `cleat view` (polls /api/state), or embedded in a snapshot
-// (window.CLEAT_SNAPSHOT). No dependencies.
+// Three ways to get its data: served by `cleat view` (polls /api/state), a
+// snapshot (window.CLEAT_SNAPSHOT), or embedded with `?embed=1`, where the
+// page that opened or framed it posts the state (the playground does this).
+// No dependencies.
 (function () {
   "use strict";
 
@@ -593,7 +595,9 @@
           n.y = y + HEAD + PAD + off + i * (NODE_H + ROW_GAP);
         });
       });
-      boxes.push({ ns, y, h });
+      const scoped = groups.get(ns).map((n) => CLUSTER_SCOPED.has(n.kind));
+      const label = ns ? null : scoped.every(Boolean) ? "cluster-scoped" : scoped.some(Boolean) ? "cluster-scoped / no namespace" : "no namespace set";
+      boxes.push({ ns, y, h, label });
       y += h + GROUP_GAP;
     }
     const width = PAD * 2 + tiersUsed.length * NODE_W + (tiersUsed.length - 1) * COL_GAP;
@@ -605,7 +609,7 @@
     const { nodes, edges, boxes, width, height } = mapLayout(rs);
     const nsBoxes = boxes
       .map((b) => `<g class="nsbox"><rect x="0.5" y="${b.y + 0.5}" width="${width - 1}" height="${b.h - 1}" rx="12"/>
-        <text x="${PAD}" y="${b.y + 22}">${b.ns ? `namespace <tspan class="nsn">${esc(b.ns)}</tspan>` : "cluster-scoped / no namespace"}</text></g>`)
+        <text x="${PAD}" y="${b.y + 22}">${b.ns ? `namespace <tspan class="nsn">${esc(b.ns)}</tspan>` : esc(b.label)}</text></g>`)
       .join("");
     const edgeSvg = edges
       .map((e, i) => {
@@ -731,6 +735,8 @@
 
   let uiInputs = null; // null: use the command line's inputs
   const snapshot = window.CLEAT_SNAPSHOT;
+  const embedded = new URLSearchParams(location.search).has("embed");
+  if (embedded) document.body.classList.add("embed");
 
   function renderInputs(inputs) {
     const box = $("inputs");
@@ -782,7 +788,7 @@
       model = build(next);
       const warnings = list(next.warnings).length;
       $("status").className = "status ok";
-      $("status").textContent = snapshot
+      $("status").textContent = snapshot || embedded
         ? "snapshot"
         : `live · ${new Date().toLocaleTimeString()}${warnings ? ` · ${warnings} warning${warnings > 1 ? "s" : ""}` : ""}`;
     }
@@ -824,5 +830,13 @@
   });
 
   if (snapshot) apply(snapshot);
-  else poll();
+  else if (embedded) {
+    // The embedding page posts `{ type: "cleat-state", state }` whenever its output changes.
+    addEventListener("message", (e) => {
+      if (e.origin !== location.origin || !e.data || e.data.type !== "cleat-state") return;
+      apply(e.data.state);
+    });
+    const host = window.opener || (window.parent !== window ? window.parent : null);
+    if (host) host.postMessage({ type: "cleat-view-ready" }, location.origin);
+  } else poll();
 })();

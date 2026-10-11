@@ -247,3 +247,14 @@ pre.yaml .n { color: var(--num); }
 
 .focus .node:not(.lit), .focus .edge:not(.lit) { opacity: .22; }
 .focus .edge.lit { stroke: var(--text); stroke-width: 2; }
+
+/* Embedded (the playground): the host page has its own file name, inputs and status. */
+body.embed .brand, body.embed .file, body.embed #inputs-toggle, body.embed .status, body.embed .inputs-panel { display: none !important; }
+body.embed .nav { width: auto; display: flex; flex-wrap: nowrap; gap: 2px; overflow-x: auto; padding: 6px 8px; border-right: 0; border-bottom: 1px solid var(--border); }
+body.embed .nav h3 { display: none; }
+body.embed .nav a { white-space: nowrap; flex: none; }
+body.embed .layout { flex-direction: column; }
+body.embed .main { padding: 12px 14px 24px; }
+body.embed .top { padding: 4px 8px; border-bottom: 0; justify-content: flex-end; }
+body.embed .top .spacer { display: none; }
+body.embed #search { width: 180px; padding: 2px 8px; font-size: 13px; }
