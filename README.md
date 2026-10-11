@@ -22,6 +22,9 @@
 > editor and Argo CD integrations can change in incompatible ways between
 > commits, and it hasn't been used in production yet. It isn't accepting
 > code contributions yet, but issues and feedback are welcome.
+>
+> **"Cleat" is a working name** and is likely to change before a first
+> release.
 
 ## A taste
 
