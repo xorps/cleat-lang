@@ -51,7 +51,7 @@
       const name = get(doc, "metadata", "name") || `#${i + 1}`;
       return {
         i, doc, kind, ns, name, yaml: r.yaml, component: r.component, wave: r.wave,
-        key: `${kind}/${ns}/${name}`, out: [], in: [], notes: [],
+        key: `${kind}/${ns}/${name}`, out: [], in: [], notes: [], missing: [],
       };
     });
     const problems = [];
@@ -68,7 +68,10 @@
       if (!name) return;
       const to = find(kind, r.ns, name);
       if (to) link(r, to, label);
-      else if (!optional) note(r, "note", `${label} ${kind} \`${name}\`, which isn't in this output (it may already exist in the cluster)`);
+      else if (!optional) {
+        r.missing.push({ kind, name, label, level: "note" });
+        note(r, "note", `${label} ${kind} \`${name}\`, which isn't in this output (it may already exist in the cluster)`);
+      }
     };
     const matches = (labels, selector) => entries(selector).length > 0 && entries(selector).every(([k, v]) => get(labels, k) === v);
 
@@ -128,6 +131,7 @@
         for (const b of backends) {
           const svc = find("Service", r.ns, b.svc);
           if (!svc) {
+            r.missing.push({ kind: "Service", name: b.svc, label: "sends traffic to", level: "warn" });
             note(r, "warn", `sends traffic for ${b.where} to Service \`${b.svc}\`, which isn't in this output`);
             continue;
           }
@@ -142,7 +146,10 @@
         if (t) {
           const to = find(t.kind, r.ns, t.name);
           if (to) link(r, to, "scales");
-          else note(r, "warn", `scales ${t.kind} \`${t.name}\`, which isn't in this output`);
+          else {
+            r.missing.push({ kind: t.kind, name: t.name, label: "scales", level: "warn" });
+            note(r, "warn", `scales ${t.kind} \`${t.name}\`, which isn't in this output`);
+          }
         }
       }
       if (r.kind === "PodDisruptionBudget") {
@@ -263,7 +270,7 @@
     for (const r of rs) byKind.set(r.kind, (byKind.get(r.kind) || 0) + 1);
     const link = (view, label, count) =>
       `<a href="${hrefFor({ view })}"${route.view === view ? ' aria-current="page"' : ""}><span>${esc(label)}</span>${count != null ? `<span class="count">${count}</span>` : ""}</a>`;
-    let html = link("overview", "Overview") + link("all", "All resources", rs.length);
+    let html = link("overview", "Overview") + link("map", "Map") + link("all", "All resources", rs.length);
     const groups = new Map();
     for (const kind of byKind.keys()) {
       const c = categoryOf(kind);
@@ -436,6 +443,211 @@
     sel.hidden = want.length <= 1;
   }
 
+  // ---------- map ----------
+  // Resources left to right in the order traffic and configuration flow:
+  // entry points, Services, workloads, then what workloads use. One box per
+  // namespace. References to resources that aren't in the output are drawn
+  // as dashed "ghost" nodes.
+
+  const TIER = {
+    Ingress: 0, Gateway: 0, HTTPRoute: 0, GRPCRoute: 0, IngressClass: 0,
+    Service: 1, NetworkPolicy: 1, HorizontalPodAutoscaler: 1, PodDisruptionBudget: 1,
+    Deployment: 2, StatefulSet: 2, DaemonSet: 2, ReplicaSet: 2, Job: 2, CronJob: 2, Pod: 2, RoleBinding: 2, ClusterRoleBinding: 2,
+    ConfigMap: 3, Secret: 3, PersistentVolumeClaim: 3, PersistentVolume: 3, StorageClass: 3, ServiceAccount: 3, Role: 3, ClusterRole: 3,
+  };
+  const ABBR = {
+    Deployment: "deploy", StatefulSet: "sts", DaemonSet: "ds", ReplicaSet: "rs", Job: "job", CronJob: "cj", Pod: "pod",
+    Service: "svc", Ingress: "ing", NetworkPolicy: "netpol", ConfigMap: "cm", Secret: "secret", PersistentVolumeClaim: "pvc",
+    PersistentVolume: "pv", StorageClass: "sc", ServiceAccount: "sa", Role: "role", RoleBinding: "rb", ClusterRole: "cr",
+    ClusterRoleBinding: "crb", HorizontalPodAutoscaler: "hpa", PodDisruptionBudget: "pdb", Namespace: "ns",
+    Gateway: "gw", HTTPRoute: "route", CustomResourceDefinition: "crd",
+  };
+  const CAT_CLASS = { Workloads: "c-work", Network: "c-net", Config: "c-conf", Storage: "c-store", "Access control": "c-rbac", Cluster: "c-cluster" };
+  const NODE_W = 220, NODE_H = 54, COL_GAP = 84, ROW_GAP = 14, PAD = 22, HEAD = 30, GROUP_GAP = 26;
+  let mapScale = null; // null: fit the pane on first show
+
+  function nodeInfo(r) {
+    const d = r.doc;
+    switch (r.kind) {
+      case "Deployment": case "StatefulSet": case "ReplicaSet": return `${get(d, "spec", "replicas") ?? 1} replica${(get(d, "spec", "replicas") ?? 1) === 1 ? "" : "s"}`;
+      case "Service": return `${get(d, "spec", "type") || "ClusterIP"} ${list(get(d, "spec", "ports")).map((p) => ":" + p.port).join(" ")}`;
+      case "Ingress": return list(get(d, "spec", "rules")).map((x) => x.host).filter(Boolean).join(", ") || "all hosts";
+      case "CronJob": return get(d, "spec", "schedule") || "";
+      case "ConfigMap": case "Secret": { const n = keysOf(d).length; return `${n} key${n === 1 ? "" : "s"}`; }
+      case "PersistentVolumeClaim": return get(d, "spec", "resources", "requests", "storage") || "";
+      case "HorizontalPodAutoscaler": return `${get(d, "spec", "minReplicas") ?? 1}–${get(d, "spec", "maxReplicas") ?? "?"} replicas`;
+      default: return d.apiVersion || "";
+    }
+  }
+
+  function mapLayout(rs) {
+    const inView = new Set(rs.map((r) => r.key));
+    const nodes = new Map();
+    for (const r of rs) nodes.set(r.key, { key: r.key, r, kind: r.kind, name: r.name, ns: r.ns, ghost: false, edges: [] });
+    const edges = [];
+    for (const r of rs) {
+      for (const e of r.out) if (inView.has(e.to.key)) edges.push({ from: r.key, to: e.to.key, label: e.label });
+      for (const m of r.missing) {
+        const key = `ghost:${m.kind}/${CLUSTER_SCOPED.has(m.kind) ? "" : r.ns}/${m.name}`;
+        if (!nodes.has(key)) nodes.set(key, { key, r: null, kind: m.kind, name: m.name, ns: CLUSTER_SCOPED.has(m.kind) ? "" : r.ns, ghost: m.level, edges: [] });
+        edges.push({ from: r.key, to: key, label: m.label, missing: m.level });
+      }
+    }
+    for (const e of edges) {
+      nodes.get(e.from).edges.push(e);
+      nodes.get(e.to).edges.push(e);
+    }
+    const tierOf = (n) => TIER[n.kind] ?? 2;
+    const groups = new Map();
+    for (const n of nodes.values()) {
+      if (!groups.has(n.ns)) groups.set(n.ns, []);
+      groups.get(n.ns).push(n);
+    }
+    const order = [...groups.keys()].sort((a, b) => (a === "") - (b === "") || a.localeCompare(b));
+    const tiersUsed = [...new Set([...nodes.values()].map(tierOf))].sort((a, b) => a - b);
+    const colOf = (n) => tiersUsed.indexOf(tierOf(n));
+    const boxes = [];
+    let y = 0;
+    for (const ns of order) {
+      const cols = tiersUsed.map(() => []);
+      for (const n of groups.get(ns)) cols[colOf(n)].push(n);
+      for (const c of cols) c.sort((a, b) => a.kind.localeCompare(b.kind) || a.name.localeCompare(b.name));
+      // Barycenter sweeps: order each column by where its neighbors are, to untangle edges.
+      const pos = new Map();
+      const index = () => cols.forEach((c) => c.forEach((n, i) => pos.set(n.key, i)));
+      index();
+      for (let sweep = 0; sweep < 6; sweep++) {
+        const seq = sweep % 2 ? [...cols.keys()].reverse() : [...cols.keys()];
+        for (const ci of seq) {
+          const bary = (n) => {
+            const ps = n.edges.map((e) => (e.from === n.key ? e.to : e.from)).filter((k) => pos.has(k) && nodes.get(k).ns === ns).map((k) => pos.get(k));
+            return ps.length ? ps.reduce((a, b) => a + b, 0) / ps.length : pos.get(n.key);
+          };
+          const b = new Map(cols[ci].map((n) => [n.key, bary(n)]));
+          cols[ci].sort((p, q) => b.get(p.key) - b.get(q.key));
+          index();
+        }
+      }
+      const rows = Math.max(...cols.map((c) => c.length), 1);
+      const h = HEAD + PAD + rows * NODE_H + (rows - 1) * ROW_GAP + PAD;
+      cols.forEach((c, ci) => {
+        // Center short columns against the tallest one.
+        const off = ((rows - c.length) * (NODE_H + ROW_GAP)) / 2;
+        c.forEach((n, i) => {
+          n.x = PAD + ci * (NODE_W + COL_GAP);
+          n.y = y + HEAD + PAD + off + i * (NODE_H + ROW_GAP);
+        });
+      });
+      boxes.push({ ns, y, h });
+      y += h + GROUP_GAP;
+    }
+    const width = PAD * 2 + tiersUsed.length * NODE_W + (tiersUsed.length - 1) * COL_GAP;
+    return { nodes, edges, boxes, width, height: Math.max(y - GROUP_GAP, 1) };
+  }
+
+  function renderMap(rs) {
+    if (!rs.length) return '<h1>Map</h1><p class="empty">Nothing matches the current filter.</p>';
+    const { nodes, edges, boxes, width, height } = mapLayout(rs);
+    const nsBoxes = boxes
+      .map((b) => `<g class="nsbox"><rect x="0.5" y="${b.y + 0.5}" width="${width - 1}" height="${b.h - 1}" rx="12"/>
+        <text x="${PAD}" y="${b.y + 22}">${b.ns ? `namespace <tspan class="nsn">${esc(b.ns)}</tspan>` : "cluster-scoped / no namespace"}</text></g>`)
+      .join("");
+    const edgeSvg = edges
+      .map((e, i) => {
+        const a = nodes.get(e.from), b = nodes.get(e.to);
+        const x1 = a.x + NODE_W, y1 = a.y + NODE_H / 2, x2 = b.x, y2 = b.y + NODE_H / 2;
+        const forward = x2 > x1;
+        const d = forward
+          ? `M${x1},${y1} C${x1 + COL_GAP / 2},${y1} ${x2 - COL_GAP / 2},${y2} ${x2},${y2}`
+          : `M${a.x + NODE_W / 2},${a.y + NODE_H} C${a.x + NODE_W / 2},${a.y + NODE_H + 40} ${b.x + NODE_W / 2},${b.y - 40} ${b.x + NODE_W / 2},${b.y}`;
+        return `<path class="edge${e.missing ? " missing " + e.missing : ""}" data-i="${i}" data-from="${esc(e.from)}" data-to="${esc(e.to)}" d="${d}" marker-end="url(#arrow${e.missing === "warn" ? "-warn" : ""})"><title>${esc(`${a.kind} ${a.name} ${e.label} ${b.kind} ${b.name}`)}</title></path>`;
+      })
+      .join("");
+    const nodeSvg = [...nodes.values()]
+      .map((n) => {
+        const r = n.r;
+        const warn = r ? r.notes.filter((x) => x.level === "warn").length : 0;
+        const cls = ["node", CAT_CLASS[categoryOf(n.kind)] || "c-custom", n.ghost ? `ghost ${n.ghost}` : "", route.sel === n.key ? "sel" : "", warn ? "has-warn" : ""].join(" ");
+        const abbr = ABBR[n.kind] || n.kind.slice(0, 6).toLowerCase();
+        const sub = n.ghost ? `${n.kind} · not in this output` : `${n.kind} · ${nodeInfo(r)}`;
+
+        return `<g class="${cls}" data-key="${esc(n.key)}" transform="translate(${n.x},${n.y})" tabindex="${r ? 0 : -1}" role="${r ? "button" : "img"}" aria-label="${esc(`${n.kind} ${n.name}`)}">
+          <title>${esc(`${n.kind} ${n.name}${n.ns ? ` (namespace ${n.ns})` : ""}${r ? ` · ${r.component}, wave ${r.wave}` : ""}`)}</title>
+          <rect class="box" width="${NODE_W}" height="${NODE_H}" rx="9"/>
+          <rect class="stripe" width="5" height="${NODE_H}" rx="2"/>
+          <circle class="badge" cx="30" cy="${NODE_H / 2}" r="17"/>
+          <text class="abbr" x="30" y="${NODE_H / 2 + 4}" text-anchor="middle">${esc(abbr)}</text>
+          <text class="nm" x="56" y="23" data-max="${NODE_W - 56 - (warn ? 26 : 10)}">${esc(n.name)}</text>
+          <text class="sub" x="56" y="41" data-max="${NODE_W - 56 - (r ? 30 : 10)}">${esc(sub)}</text>
+          ${warn ? `<g class="warnb"><circle cx="${NODE_W - 12}" cy="12" r="8"/><text x="${NODE_W - 12}" y="16" text-anchor="middle">!</text></g>` : ""}
+          ${r ? `<text class="wave" x="${NODE_W - 10}" y="${NODE_H - 9}" text-anchor="end">w${esc(r.wave)}</text>` : ""}
+        </g>`;
+      })
+      .join("");
+    const legend = `<div class="legend"><span><i class="lg c-net"></i>network</span><span><i class="lg c-work"></i>workload</span><span><i class="lg c-conf"></i>config</span><span><i class="lg c-store"></i>storage</span><span><i class="lg c-rbac"></i>access</span><span><i class="lg ghost"></i>not in this output</span></div>`;
+    return `<div class="map-head"><h1>Map</h1>${legend}<div class="zoom"><button type="button" data-zoom="out" aria-label="Zoom out">−</button><button type="button" data-zoom="fit">Fit</button><button type="button" data-zoom="in" aria-label="Zoom in">+</button></div></div>
+      <div class="map" id="map"><svg id="map-svg" viewBox="0 0 ${width} ${height}" data-w="${width}" data-h="${height}" width="${width * (mapScale || 1)}" height="${height * (mapScale || 1)}" role="group" aria-label="Map of resources">
+        <defs>
+          <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path class="arrowhead" d="M0,0 L10,5 L0,10 z"/></marker>
+          <marker id="arrow-warn" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path class="arrowhead warn" d="M0,0 L10,5 L0,10 z"/></marker>
+        </defs>
+        ${nsBoxes}<g class="edges">${edgeSvg}</g><g class="nodes">${nodeSvg}</g></svg></div>`;
+  }
+
+  function wireMap() {
+    const svg = $("map-svg");
+    if (!svg) return;
+    const setScale = (s) => {
+      mapScale = Math.min(2.5, Math.max(0.25, s));
+      svg.setAttribute("width", svg.dataset.w * mapScale);
+      svg.setAttribute("height", svg.dataset.h * mapScale);
+    };
+    // Shorten names that don't fit their box (the full name is in the tooltip and detail panel).
+    for (const t of svg.querySelectorAll("text[data-max]")) {
+      const max = Number(t.dataset.max);
+      if (t.getComputedTextLength() <= max) continue;
+      let text = t.textContent;
+      while (text.length > 1 && t.getComputedTextLength() > max) {
+        text = text.slice(0, -1);
+        t.textContent = text.trimEnd() + "…";
+      }
+    }
+    const fit = () => setScale(Math.min(1, ($("map").clientWidth - 26) / svg.dataset.w));
+    if (mapScale == null) fit();
+    for (const b of $("main").querySelectorAll("[data-zoom]")) {
+      b.onclick = () => {
+        if (b.dataset.zoom === "fit") fit();
+        else setScale(mapScale * (b.dataset.zoom === "in" ? 1.2 : 1 / 1.2));
+      };
+    }
+    const nodesEls = [...svg.querySelectorAll(".node")];
+    const edgeEls = [...svg.querySelectorAll(".edge")];
+    const focus = (key) => {
+      if (!key) {
+        svg.classList.remove("focus");
+        return;
+      }
+      const near = new Set([key]);
+      for (const e of edgeEls) {
+        const on = e.dataset.from === key || e.dataset.to === key;
+        e.classList.toggle("lit", on);
+        if (on) near.add(e.dataset.from).add(e.dataset.to);
+      }
+      for (const n of nodesEls) n.classList.toggle("lit", near.has(n.dataset.key));
+      svg.classList.add("focus");
+    };
+    for (const n of nodesEls) {
+      n.onmouseenter = () => focus(n.dataset.key);
+      n.onmouseleave = () => focus(route.sel && route.sel !== n.dataset.key ? route.sel : null);
+      const open = () => {
+        if (!n.dataset.key.startsWith("ghost:")) location.hash = hrefFor({ sel: n.dataset.key }).slice(1);
+      };
+      n.onclick = open;
+      n.onkeydown = (e) => (e.key === "Enter" || e.key === " ") && (e.preventDefault(), open());
+    }
+    if (route.sel) focus(route.sel);
+  }
+
   function render() {
     parseHash();
     renderNamespaces();
@@ -443,12 +655,14 @@
     renderNav(rs);
     let html;
     if (route.view === "overview") html = renderOverview(rs);
+    else if (route.view === "map") html = renderMap(rs);
     else if (route.view === "all") html = renderTable(rs, "All resources");
     else {
       const kind = route.view.slice(5);
       html = renderTable(rs.filter((r) => r.kind === kind), kind);
     }
     $("main").innerHTML = html;
+    if (route.view === "map") wireMap();
     for (const tr of $("main").querySelectorAll("tbody tr")) {
       tr.onclick = (e) => {
         if (e.target.closest("a")) return;

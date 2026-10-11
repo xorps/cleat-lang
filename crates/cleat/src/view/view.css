@@ -192,3 +192,58 @@ pre.yaml .n { color: var(--num); }
   .detail { width: auto; border-left: 0; border-top: 1px solid var(--border); }
   #search { width: 140px; }
 }
+
+/* ---------- map ---------- */
+:root { --c-net: #2f6db5; --c-work: #0e9f83; --c-conf: #a86f00; --c-store: #8a3ffc; --c-rbac: #c0267a; --c-cluster: #5b6b80; --c-custom: #5b6b80; --edge: #9aa8b8; }
+@media (prefers-color-scheme: dark) {
+  :root { --c-net: #7cb8ff; --c-work: #35ebc6; --c-conf: #f0b429; --c-store: #c39bff; --c-rbac: #ff8ac4; --c-cluster: #8a9bb0; --c-custom: #8a9bb0; --edge: #4b5d75; }
+}
+.map-head { display: flex; align-items: center; gap: 18px; flex-wrap: wrap; margin-bottom: 12px; }
+.map-head h1 { margin: 0; }
+.legend { display: flex; gap: 14px; flex-wrap: wrap; font-size: 12px; color: var(--muted); }
+.legend .lg { display: inline-block; width: 10px; height: 10px; border-radius: 3px; margin-right: 5px; vertical-align: -1px; background: var(--cat); }
+.legend .lg.ghost { background: none; border: 1.5px dashed var(--muted); }
+.zoom { margin-left: auto; display: flex; gap: 4px; }
+.zoom button { min-width: 34px; }
+.map { overflow: auto; border: 1px solid var(--border); border-radius: 12px; background: var(--bg); padding: 12px; }
+.map svg { display: block; font-family: var(--sans); }
+
+.c-net { --cat: var(--c-net); }
+.c-work { --cat: var(--c-work); }
+.c-conf { --cat: var(--c-conf); }
+.c-store { --cat: var(--c-store); }
+.c-rbac { --cat: var(--c-rbac); }
+.c-cluster { --cat: var(--c-cluster); }
+.c-custom { --cat: var(--c-custom); }
+
+.nsbox rect { fill: var(--panel); stroke: var(--border); }
+.nsbox text { font-size: 12px; fill: var(--muted); letter-spacing: .03em; }
+.nsbox .nsn { font-weight: 700; fill: var(--text); }
+
+.edge { fill: none; stroke: var(--edge); stroke-width: 1.6; transition: opacity .12s; }
+.edge.missing { stroke-dasharray: 5 4; }
+.edge.missing.warn { stroke: var(--warn); }
+.arrowhead { fill: var(--edge); }
+.arrowhead.warn { fill: var(--warn); }
+
+.node { cursor: pointer; transition: opacity .12s; outline: none; }
+.node .box { fill: var(--panel); stroke: var(--border); stroke-width: 1.2; }
+.node .stripe { fill: var(--cat); }
+.node .badge { fill: var(--cat); opacity: .14; }
+.node .abbr { font-size: 10.5px; font-weight: 700; fill: var(--cat); }
+.node .nm { font-size: 13.5px; font-weight: 650; fill: var(--text); }
+.node .sub { font-size: 11.5px; fill: var(--muted); }
+.node .wave { font-size: 10px; fill: var(--muted); }
+.node:hover .box, .node:focus-visible .box { stroke: var(--cat); stroke-width: 2; }
+.node.sel .box { stroke: var(--cat); stroke-width: 2.5; }
+.node.has-warn .box { stroke: var(--warn); }
+.node .warnb circle { fill: var(--warn); }
+.node .warnb text { font-size: 11px; font-weight: 800; fill: var(--panel); }
+.node.ghost { cursor: default; }
+.node.ghost .box { fill: none; stroke: var(--muted); stroke-dasharray: 5 4; }
+.node.ghost.warn .box { stroke: var(--warn); }
+.node.ghost .nm, .node.ghost .abbr { fill: var(--muted); }
+.node.ghost .stripe, .node.ghost .badge { display: none; }
+
+.focus .node:not(.lit), .focus .edge:not(.lit) { opacity: .22; }
+.focus .edge.lit { stroke: var(--text); stroke-width: 2; }
