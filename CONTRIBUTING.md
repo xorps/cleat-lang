@@ -1,8 +1,15 @@
 # Contributing to Cleat
 
-Thanks for your interest! Cleat is under active development, so expect
-things to move. Opening an issue to discuss larger changes before writing
-code is the fastest way to get them in.
+> [!NOTE]
+> **Cleat isn't accepting code contributions yet.** It's under active
+> development and still changing in incompatible ways, so pull requests are
+> likely to conflict with work in progress. Bug reports and feedback in
+> issues are welcome. This guide describes how contributions will work once
+> they open up.
+
+Thanks for your interest! When contributions open, opening an issue to
+discuss larger changes before writing code will be the fastest way to get
+them in.
 
 ## Getting set up
 
