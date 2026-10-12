@@ -290,3 +290,4 @@ pre.diff .d-hunk { color: var(--muted); }
 .node.diff-added .chgb rect { fill: var(--add-bg); } .node.diff-added .chgb text { fill: var(--add); }
 .node.diff-changed .chgb rect { fill: var(--chg-bg); } .node.diff-changed .chgb text { fill: var(--chg); }
 .node.diff-removed .chgb rect { fill: var(--del-bg); } .node.diff-removed .chgb text { fill: var(--del); }
+button.linkish { border: 0; padding: 0; background: none; color: var(--accent); text-decoration: underline; cursor: pointer; font: inherit; }
