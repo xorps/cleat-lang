@@ -315,6 +315,20 @@
     if (next.sel) p.set("sel", next.sel);
     return "#" + p.toString();
   }
+  // The route lives here; the URL fragment mirrors it where the page may
+  // change it. Every in-page link goes through `navigate`, because VS Code
+  // webviews intercept `#` links and cancel them, so the fragment never changes.
+  function navigate(href) {
+    const p = new URLSearchParams(href.replace(/^#/, ""));
+    route = { view: p.get("view") || "overview", sel: p.get("sel") };
+    try {
+      history.pushState(null, "", "#" + p.toString());
+    } catch {
+      // Not allowed here (some embedders); the in-memory route is enough.
+    }
+    render();
+  }
+
 
   function visible(withRemoved) {
     const ns = $("ns").value;
@@ -486,7 +500,7 @@
     kv.push(["Component", `${esc(r.component)} <span class="muted">· wave ${esc(r.wave)}</span>`]);
     if (!r.removed && r.line > 0) {
       const at = `${esc((data.file || "").split(/[\\/]/).pop())}:${r.line}`;
-      kv.push(["Defined at", vscodeApi ? `<a href="#" id="reveal-src">${at}</a>` : at]);
+      kv.push(["Defined at", vscodeApi ? `<button type="button" class="linkish" id="reveal-src">${at}</button>` : at]);
     }
     const cols = COLUMNS[r.kind] || [];
     for (const [label, f] of cols) if (label !== "Images" && label !== "Ports") kv.push([label, f(r)]);
@@ -522,10 +536,7 @@
     html += `<div class="yaml-head"><h2>YAML</h2><button type="button" id="copy-yaml">Copy</button></div><pre class="yaml">${yamlHtml(r.yaml || "")}</pre>`;
     el.innerHTML = html;
     if ($("reveal-src")) {
-      $("reveal-src").onclick = (e) => {
-        e.preventDefault();
-        reveal(r);
-      };
+      $("reveal-src").onclick = () => reveal(r);
     }
     $("copy-yaml").onclick = async (e) => {
       try {
@@ -760,7 +771,7 @@
       n.onmouseenter = () => focus(n.dataset.key);
       n.onmouseleave = () => focus(route.sel && route.sel !== n.dataset.key ? route.sel : null);
       const open = () => {
-        if (!n.dataset.key.startsWith("ghost:")) location.hash = hrefFor({ sel: n.dataset.key }).slice(1);
+        if (!n.dataset.key.startsWith("ghost:")) navigate(hrefFor({ sel: n.dataset.key }));
       };
       n.onclick = open;
       n.onkeydown = (e) => (e.key === "Enter" || e.key === " ") && (e.preventDefault(), open());
@@ -774,7 +785,6 @@
   }
 
   function render() {
-    parseHash();
     if (route.sel !== lastSel) {
       lastSel = route.sel;
       reveal(model.res.find((x) => x.key === route.sel));
@@ -795,7 +805,7 @@
     for (const tr of $("main").querySelectorAll("tbody tr")) {
       tr.onclick = (e) => {
         if (e.target.closest("a")) return;
-        location.hash = hrefFor({ sel: tr.dataset.key }).slice(1);
+        navigate(hrefFor({ sel: tr.dataset.key }));
       };
     }
     renderDetail();
@@ -928,9 +938,28 @@
   $("ns").onchange = render;
   $("changes-only").onchange = render;
   $("search").oninput = render;
-  addEventListener("hashchange", render);
+  // Back/forward, or a fragment typed into the address bar.
+  const fromUrl = () => {
+    parseHash();
+    render();
+  };
+  addEventListener("hashchange", fromUrl);
+  addEventListener("popstate", fromUrl);
+  // Catch in-page links before anything else does (VS Code cancels them otherwise).
+  document.addEventListener(
+    "click",
+    (e) => {
+      const a = e.target.closest && e.target.closest('a[href^="#"]');
+      if (!a || e.button !== 0 || e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) return;
+      e.preventDefault();
+      e.stopPropagation();
+      navigate(a.getAttribute("href"));
+    },
+    true
+  );
+  parseHash();
   addEventListener("keydown", (e) => {
-    if (e.key === "Escape" && route.sel) location.hash = hrefFor({ sel: null }).slice(1);
+    if (e.key === "Escape" && route.sel) navigate(hrefFor({ sel: null }));
   });
 
   if (snapshot) apply(snapshot);
